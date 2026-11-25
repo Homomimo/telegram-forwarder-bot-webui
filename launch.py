@@ -150,6 +150,13 @@ async def serve(data):
     if not ip:
         raise SystemExit("必须填写 RELAY_VPS_IP 并使用 HTTPS")
     ip = vps_https.validate_ip(ip, password)
+    try:
+        public_port = int(os.environ.get("WEB_PORT", addr[1]))
+    except ValueError:
+        raise SystemExit("WEB_PORT 必须是 1 到 65535 之间的整数") from None
+    if not 1 <= public_port <= 65535:
+        raise SystemExit("WEB_PORT 必须是 1 到 65535 之间的整数")
+    bot.admin_panel.webui_url = f"https://{ip}:{public_port}"
     server = vps_https.IPHTTPSServer(addr, Handler, ip, vps_https.tls_context(data, ip))
     cert = (data / "tls" / ip / "cert.pem").read_text("ascii")
     print("HTTPS SHA256:", hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest(), flush=True)

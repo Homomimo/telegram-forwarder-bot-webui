@@ -120,6 +120,29 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         rows.clear()
         await self.click('⬅️ 返回记录'); self.assertIn('暂无转发记录', self.page.raw_text)
 
+    async def test_webui_url_only_appears_in_configured_private_system_menu(self):
+        label = '🌐 打开 WebUI'
+        panel = self.bot.admin_panel
+        await self.click('⚙️ 系统管理')
+        self.assertFalse(any(b.text == label for row in self.page.buttons for b in row))
+        await self.click('⬅️ 返回面板')
+
+        panel.webui_url = 'https://203.0.113.10:9443'
+        await self.text('/start')
+        self.assertFalse(any(b.text == label for row in self.page.buttons for b in row))
+        await self.click('⚙️ 系统管理')
+        markup = TelegramClient.build_reply_markup(self.page.buttons)
+        links = [b for row in markup.rows for b in row.buttons if b.text == label]
+        self.assertEqual(len(links), 1)
+        self.assertIsInstance(links[0].type, types.InlineButtonTypeUrl)
+        self.assertEqual(links[0].type.url, panel.webui_url)
+        self.assertEqual(set(self.session.choices.values()), {'ask:restart', 'home'})
+        await self.click('⬅️ 返回面板')
+
+        for uid, chat in [(UID, -90), (71, 71)]:
+            event = await self.text('/start', uid=uid, chat=chat)
+            self.assertNotIn('buttons', event.respond.await_args.kwargs)
+
     async def test_home_pages_refresh_back_and_context(self):
         self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
         self.assertEqual(len(self.page.buttons), 4)
