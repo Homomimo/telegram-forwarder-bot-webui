@@ -18,6 +18,6 @@ fi
 docker build --build-arg "APP_VERSION=$version" --tag "$image" --tag "$repository:latest" .
 docker run -d --name "$name" --init --restart unless-stopped --security-opt no-new-privileges \
   --log-opt max-size=10m --log-opt max-file=3 -p "$port:8765" -v /root/telegram-forwarder/data:/data \
-  -e RELAY_VPS_IP -e RELAY_LOG_PASSWORD -e RELAY_PASSWORD \
+  -e RELAY_VPS_IP -e "WEB_PORT=$port" -e RELAY_LOG_PASSWORD -e RELAY_PASSWORD \
   -e BOT_TOKEN -e ADMIN_IDS -e SUBMITTER_IDS -e API_ID -e API_HASH "$image"
 printf '查看登录信息：docker logs %s\n' "$name"

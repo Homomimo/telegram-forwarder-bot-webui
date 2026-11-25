@@ -67,6 +67,7 @@ class AdminPanel:
     def __init__(self, bot, *, allowed, home, guide, target_id, source_id, source_list, post_link, export_range):
         self.bot, self.allowed = bot, allowed
         self.home, self.guide = home, guide
+        self.webui_url: str | None = None
         self.target_id, self.source_id, self.source_list = target_id, source_id, source_list
         self.post_link, self.export_range = post_link, export_range
         self.sessions: dict[int, Session] = {}  # At most one current panel and lock per administrator.
@@ -83,7 +84,11 @@ class AdminPanel:
         buttons, choices = [], {}
         for row in rows:
             line = []
-            for label, action in row:
+            for button in row:
+                if isinstance(button, types.KeyboardInlineButton):
+                    line.append(button)
+                    continue
+                label, action = button
                 data = token + str(len(choices)).encode()
                 choices[data] = action
                 line.append(Button.inline(label, data))
@@ -243,7 +248,10 @@ class AdminPanel:
         elif action == 'help':
             await self._screen(s, self.guide, [BACK])
         elif action == 'system':
-            await self._screen(s, '⚙️ 系统管理', [[('🔄 重启机器人…', 'ask:restart')], BACK])
+            rows = [[('🔄 重启机器人…', 'ask:restart')], BACK]
+            if self.webui_url:
+                rows.insert(0, [Button.url('🌐 打开 WebUI', self.webui_url)])
+            await self._screen(s, '⚙️ 系统管理', rows)
         elif action == 'history' or action.startswith(('hpage:', 'hdetail:')):
             text, rows = self.history_view(s, action)
             await self.bot.client.edit_message(s.owner, s.mid, text, buttons=self._keyboard(s, rows),

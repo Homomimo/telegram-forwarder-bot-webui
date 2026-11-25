@@ -29,6 +29,8 @@ docker logs telegram-forwarder-bot
 
 打开 `https://你的VPS公网IPv4:8765`，首次访问时核对浏览器证书指纹与日志中的 `HTTPS SHA256`。使用用户名 `admin` 和日志中的 `Web password` 登录。
 
+管理员也可以在机器人私聊中发送 `/start`，选择「⚙️ 系统管理 → 🌐 打开 WebUI」。按钮只打开网页，不会代为登录。若把宿主机端口改为例如 `9443`，请在 `docker run` 中同时使用 `-p 9443:8765` 和 `-e WEB_PORT=9443`，并在安全组放行对应端口。
+
 > 命令中的凭据会留在终端历史中，也可被有 Docker 管理权限的人通过 `docker inspect` 查看。请勿公开日志或泄露凭据。
 
 ## 首次配置
