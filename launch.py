@@ -18,15 +18,14 @@ import vps_https
 
 
 def prepare_data():
-    base = Path(os.getenv("RELAY_DATA", "/data")).resolve()
-    base.mkdir(parents=True, exist_ok=True)
-    data = base / "live"
-    if data.is_symlink():
-        raise ValueError("数据目录不能是符号链接")
-    data.mkdir(mode=0o700, exist_ok=True)
-    # Docker creates a new bind mount as root. Keep private data readable after dropping privileges.
-    if sys.platform == "linux" and os.getuid() == 0 and base == Path("/data"):
-        os.chown(base, 10001, 10001)  # Support a host bind mount with mode 0700.
+    data = Path(os.getenv("RELAY_DATA", "/data")).resolve()
+    data.mkdir(mode=0o700, parents=True, exist_ok=True)
+    legacy = data / "live"
+    if legacy.exists() or legacy.is_symlink():
+        raise SystemExit("发现旧数据目录 /data/live。请按 README 使用 VPS 更新脚本迁移，未启动服务。")
+    # The bind mount itself now stores private data. Restrict it before dropping privileges.
+    if sys.platform == "linux" and os.getuid() == 0 and data == Path("/data"):
+        data.chmod(0o700)
         os.chown(data, 10001, 10001)
         os.setgroups([])
         os.setgid(10001)

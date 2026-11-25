@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,8 @@ NAME = 'telegram-forwarder-bot'
 IMAGE = 'ghcr.io/homomimo/telegram-forwarder-bot-webui:latest'
 SOCKET = '/var/run/docker.sock'
 BACKUPS = Path('/root/telegram-forwarder/backups')
+DATA_LAYOUT_LABEL = 'io.github.homomimo.telegram-forwarder.data-layout'
+QUEUE_DB = 'message_map.sqlite3.queue.sqlite3'
 STAGED = NAME + '.next'
 PREVIOUS = NAME + '.previous'
 stop_requested = False
@@ -96,13 +99,42 @@ def data_directory(old):
         raise RuntimeError('仅支持将单个宿主机数据目录以可写模式绑定到 /data。')
     data = Path(mounts[0]['Source']).resolve(strict=True)
     backups = BACKUPS.resolve()
-    if not (data / 'live').is_dir() or data == backups or data in backups.parents:
+    if not data.is_dir() or data == backups or data in backups.parents:
         raise RuntimeError('数据目录不正确，或备份目录位于数据目录内。')
     return data
 
 
+def image_data_layout(config):
+    layout = (config.get('Labels') or {}).get(DATA_LAYOUT_LABEL, 'legacy')
+    if layout not in ('legacy', 'flat'):
+        raise RuntimeError('镜像使用不支持的数据布局，取消更新。')
+    return layout
+
+
+def storage_directory(data, layout):
+    legacy = data / 'live'
+    flat_journal = data / QUEUE_DB
+    if layout == 'legacy':
+        if legacy.is_symlink() or not legacy.is_dir() or flat_journal.exists() or flat_journal.is_symlink():
+            raise RuntimeError('旧数据目录缺失或与新布局混用，取消更新。')
+        return legacy
+    if legacy.exists() or legacy.is_symlink():
+        raise RuntimeError('新布局中仍有旧数据目录，取消更新。')
+    return data
+
+
+def move_entries(entries, destination):
+    # Check all names first, including dangling symlinks. Never overwrite a data file.
+    for entry in entries:
+        target = destination / entry.name
+        if target.exists() or target.is_symlink():
+            raise RuntimeError(f'数据迁移目标已存在：{target.name}，未覆盖。')
+    for entry in entries:
+        entry.rename(destination / entry.name)
+
+
 def check_queue(data):
-    journal = data / 'live' / 'message_map.sqlite3.queue.sqlite3'
+    journal = data / QUEUE_DB
     # mode=ro must not silently create an empty queue if a deployment uses another layout.
     db = sqlite3.connect(journal.as_uri() + '?mode=ro', uri=True)
     try:
@@ -176,7 +208,15 @@ def update():
     data = data_directory(old)
     if b'GNU tar' not in subprocess.check_output(['tar', '--version'], start_new_session=True):
         raise RuntimeError('需要 GNU tar 来保留备份的所有者和权限。')
-    check_queue(data)
+    old_layout = image_data_layout(base)
+    new_layout = image_data_layout(image['Config'])
+    storage = storage_directory(data, old_layout)
+    migrate = old_layout == 'legacy' and new_layout == 'flat'
+    if old_layout == 'flat' and new_layout == 'legacy':
+        raise RuntimeError('不能用旧布局的镜像启动新布局的数据，取消更新。')
+    if migrate and set(data.iterdir()) != {storage}:
+        raise RuntimeError('数据根目录除 live 外还有其他文件，请先核对并移出这些文件，未迁移。')
+    check_queue(storage)
     defaults = environment(base)
     current = environment(old['Config'])
     if defaults.keys() - current.keys():
@@ -184,6 +224,7 @@ def update():
     overrides = {k: v for k, v in current.items() if defaults.get(k) != v}
     cid = create_candidate(old, base, overrides, image['Id'])
     stopping_old = False
+    legacy_metadata = None
     try:
         candidate = inspect('container', cid)
         if candidate['Mounts'] != old['Mounts']:
@@ -201,9 +242,17 @@ def update():
         stopped = inspect('container', previous_id)['State']
         if stopped['Status'] != 'exited' or stopped['ExitCode'] == 137:
             raise RuntimeError('旧容器未正常停止，取消更新。')
-        check_queue(data)  # Catch admissions between the first check and graceful shutdown.
+        check_queue(storage)  # Catch admissions between the first check and graceful shutdown.
         backup(data)
         docker('rename', previous_id, PREVIOUS)
+        if migrate:
+            if set(data.iterdir()) != {storage}:
+                raise RuntimeError('停机后发现数据根目录还有其他文件，未迁移。')
+            legacy_metadata = storage.stat()
+            data.chmod(0o700)
+            move_entries(list(storage.iterdir()), data)
+            storage.rmdir()
+            print('数据已从 /data/live 移到 /data。')
         docker('rename', cid, NAME)
         docker('start', cid)
         wait_ready(cid)
@@ -217,6 +266,17 @@ def update():
         docker('rm', cid)  # Must succeed before the old process can access /data again.
         if stopping_old:
             print('更新未完成，尝试恢复旧容器（不还原数据）。', file=sys.stderr)
+            if legacy_metadata is not None:
+                # Move the current files back, including any new writes by the candidate.
+                # Do not start the old image with an empty queue or a stale snapshot.
+                try:
+                    if not storage.exists():
+                        storage.mkdir(mode=0o700)
+                        os.chown(storage, legacy_metadata.st_uid, legacy_metadata.st_gid)
+                        storage.chmod(stat.S_IMODE(legacy_metadata.st_mode))
+                    move_entries([entry for entry in data.iterdir() if entry != storage], storage)
+                except (OSError, RuntimeError) as exc:
+                    raise RuntimeError('未能将数据移回 /data/live，旧容器未启动；请保留全部数据并手动检查。') from exc
             old = inspect('container', previous_id)
             if old['Name'] != '/' + NAME:
                 docker('rename', previous_id, NAME)

@@ -11,10 +11,34 @@ from telethon import types
 
 import bot_fixture as fixtures
 from clone_receipts import Delivered
+from launch import prepare_data
 from relay_delivery import album_batches
 from test_monitor_tdl_fallback import photo
 
 app, SOURCE, TARGET = fixtures.app, fixtures.SOURCE, fixtures.TARGET
+
+
+class DataDirectoryTests(unittest.TestCase):
+    def test_new_install_uses_configured_directory_directly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp).resolve() / "data"
+            with patch.dict("os.environ", {"RELAY_DATA": str(data)}):
+                self.assertEqual(prepare_data(), data)
+            self.assertTrue(data.is_dir())
+            self.assertFalse((data / "live").exists())
+
+    def test_startup_refuses_to_initialize_over_legacy_data(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp).resolve()
+            legacy = data / "live"
+            legacy.mkdir()
+            config = legacy / "channels.json"
+            config.write_text('{"target": 1234567890}', encoding="utf-8")
+            with patch.dict("os.environ", {"RELAY_DATA": str(data)}):
+                with self.assertRaisesRegex(SystemExit, "/data/live"):
+                    prepare_data()
+            self.assertEqual(list(data.iterdir()), [legacy])
+            self.assertEqual(config.read_text(encoding="utf-8"), '{"target": 1234567890}')
 
 
 class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase):

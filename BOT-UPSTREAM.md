@@ -106,7 +106,7 @@
 | 分页浏览记录 / 查看成员与目标帖 / 清空本地记录 | `/flog [页码]` · `/flog id <记录号> [详情页码]` · `/flog clear` |
 | 重启机器人进程 | `/restart` |
 
-- **设置生效范围：** 通过 Bot 或 WebUI 修改目标和监听源后，配置会立即生效并保存到 `/data/live/channels.json`。沿用同一个数据目录，重启后无需重设。切换目标不改变已入队任务的目标。
+- **设置生效范围：** 通过 Bot 或 WebUI 修改目标和监听源后，配置会立即生效并保存到 `/data/channels.json`。沿用同一个数据目录，重启后无需重设。切换目标不改变已入队任务的目标。
 - **查看队列：** `/queue` 和面板「📋 任务队列」区分正在处理、按执行顺序排队、定时重试、收集相册、等待频道或映射库，以及待映射的编辑。待映射的编辑只计数，不占执行队列。
 - **停止与清理：** `/tdlstop` 停止当前手动转发任务，清空等待任务及定时重试；不会强停正在执行的自动同步，不会撤回帖子，也不会清除待核对记录。到目标频道核对后，用 `/queue done` 加任务 ID 或 `all` 移除记录；它不会删除消息、同步映射或防重发记录，也不会重新发送。`/flog clear` 只清转发历史。
 - **按钮如何回复：** 回复机器人的输入提示，而不是另发消息。输入提示和确认页 5 分钟有效；回复「取消」可退出，重新打开 `/start` 或 `/help` 会使旧面板失效。请直接发送管理命令，不要转发命令消息。
@@ -120,7 +120,7 @@
 | 文字更新了，但附件没有更换 | 原地替换支持照片、视频以及以文件形式发送的普通图片和视频；其他附件只同步文字。相册按成员更新。若 Telegram 拒绝替换，不会删除原帖重发 |
 | 目标帖还在，手动同步却提示没有映射 | 确认提交的是**源帖**，且目标频道未切换。手动投递的回执不建立编辑映射；映射过期或数据卷被删除也会导致这种情况 |
 | 换了 Bot Token，重启后仍提示无效 | `docker restart` 不会更改环境变量。确认令牌由 BotFather 签发，再按[一键启动](README.md#一键启动)用新 `BOT_TOKEN` 重新创建容器，保留原 `/data` 挂载及其他配置。不要同时运行新旧实例。 |
-| 日志提示转发历史损坏 | 在宿主机的 `/root/telegram-forwarder/data/live/` 查找 `forward_history.json.corrupt-*` 备份。历史与同步映射是两份数据，不要为修复历史而删除映射库或队列库。 |
+| 日志提示转发历史损坏 | 在宿主机的 `/root/telegram-forwarder/data/` 查找 `forward_history.json.corrupt-*` 备份。历史与同步映射是两份数据，不要为修复历史而删除映射库或队列库。 |
 
 ## 运维与数据
 
@@ -130,12 +130,12 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| `live/channels.json` | 目标频道、监听来源及备注 |
-| `live/forward_history.json` | `/flog` 转发历史 |
-| `live/message_map.sqlite3` | 源帖与目标帖的映射、投递去重记录 |
-| `live/message_map.sqlite3.queue.sqlite3` | 等待、重试及待核对任务 |
-| `live/accounts/` | TDL 与 Telethon 账号会话 |
-| `live/tls/`、`live/web-password.json` | HTTPS 证书和私钥、默认生成的 Web 登录密码 |
+| `channels.json` | 目标频道、监听来源及备注 |
+| `forward_history.json` | `/flog` 转发历史 |
+| `message_map.sqlite3` | 源帖与目标帖的映射、投递去重记录 |
+| `message_map.sqlite3.queue.sqlite3` | 等待、重试及待核对任务 |
+| `accounts/` | TDL 与 Telethon 账号会话 |
+| `tls/`、`web-password.json` | HTTPS 证书和私钥、默认生成的 Web 登录密码 |
 
 手动备份前先确认队列空闲，再用 `docker stop telegram-forwarder-bot` 停止容器，以 root 备份整个数据目录，完成后用 `docker start telegram-forwarder-bot` 恢复。备份含登录凭据，不要公开或覆盖唯一的旧备份。镜像更新使用 [VPS 更新脚本](README.md#在-vps-上更新)。
 
