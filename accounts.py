@@ -258,7 +258,12 @@ class Manager:
                 if provider == "telethon":
                     aid = str(p.get("api_id", "")).strip()
                     ah = str(p.get("api_hash", "")).strip()
-                    if saved and not aid and not ah:
+                    if bool(aid) != bool(ah):
+                        raise ValueError("自定义应用凭据时，请同时填写 API ID 和 API Hash")
+                    if not saved and not aid:
+                        aid = os.environ.get("API_ID", "").strip()
+                        ah = os.environ.get("API_HASH", "").strip()
+                    elif saved and not aid:
                         try:
                             stored = json.loads(
                                 (Path(data) / "accounts" / "telethon.json").read_text("utf-8")

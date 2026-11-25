@@ -63,6 +63,15 @@ def create_candidate(old, base, overrides, image_id):
     return json.loads(result.stdout)['Id']
 
 
+def comparable_host_config(container):
+    host = container['HostConfig'].copy()
+    # Docker can report an unset OOM-killer opt-out as null on a running container
+    # and false on its newly created replacement. An explicit true is not equivalent.
+    if host.get('OomKillDisable') is None:
+        host['OomKillDisable'] = False
+    return host
+
+
 def data_directory(old):
     host = old['HostConfig']
     mounts = old['Mounts']
@@ -177,8 +186,14 @@ def update():
     stopping_old = False
     try:
         candidate = inspect('container', cid)
-        if candidate['HostConfig'] != old['HostConfig'] or candidate['Mounts'] != old['Mounts']:
-            raise RuntimeError('候选容器的挂载、端口或运行参数与原容器不一致，取消更新。')
+        if candidate['Mounts'] != old['Mounts']:
+            raise RuntimeError('候选容器的挂载（Mounts）与原容器不一致，取消更新。')
+        old_host = comparable_host_config(old)
+        new_host = comparable_host_config(candidate)
+        if old_host != new_host:
+            fields = sorted(k for k in old_host.keys() | new_host.keys()
+                            if k not in old_host or k not in new_host or old_host[k] != new_host[k])
+            raise RuntimeError('候选容器运行参数不一致，取消更新。差异字段：' + ', '.join(fields))
         if environment(candidate['Config']) != {**environment(image['Config']), **overrides}:
             raise RuntimeError('候选容器的环境配置不符，取消更新。')
         stopping_old = True

@@ -374,20 +374,19 @@ function openLogin(provider) {
   const steps =
     "<p>在已登录的 Telegram 手机上打开「设置 → 设备 → 连接桌面设备」，扫描本窗口的二维码并确认。</p>";
   const my = ++generation;
-  const applicationFields = `<label>API ID<input name="api_id" ${replace ? "" : "required"} inputmode="numeric" pattern="[1-9][0-9]{0,9}"></label><label>API Hash<input name="api_hash" ${replace ? "" : "required"} type="password" pattern="[0-9A-Fa-f]{32}" autocomplete="off"></label><small class="hint">在 my.telegram.org/apps 获取自己的应用凭据。</small>`;
+  const applicationFields = tele
+    ? `<details><summary>使用其他 Telegram 应用凭据（可选）</summary>
+       <p class="hint">默认使用${replace ? "当前会话保存的凭据" : "容器配置的凭据"}。如需更换，请同时填写两项。</p>
+       <label>API ID<input name="api_id" inputmode="numeric" pattern="[1-9][0-9]{0,9}" autocomplete="off"></label>
+       <label>API Hash<input name="api_hash" type="password" pattern="[0-9A-Fa-f]{32}" autocomplete="off"></label></details>`
+    : "";
   modal(
     title,
     (replace
       ? '<p class="note">新账号验证成功后才替换原会话，取消、超时或失败均保留原凭据。建议使用原 Telegram 账号重新授权，以保留频道权限和编辑能力。</p><p class="hint">如有任务正在执行，请先暂停队列并等待任务结束；保存时会等待当前任务完成。</p>'
       : "") +
       steps +
-      (tele
-        ? replace
-          ? '<details><summary>更换 Telegram 应用凭据（可选）</summary><p class="hint">两项均留空时沿用原 API ID 和 API Hash，无需重新填写。</p>' +
-            applicationFields +
-            "</details>"
-          : applicationFields
-        : ""),
+      applicationFields,
     replace ? "确认并生成二维码" : "生成二维码",
     async (p) => {
       const { flow } = await authPost("start", { provider, replace, ...p });
