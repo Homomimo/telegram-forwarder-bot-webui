@@ -1,9 +1,15 @@
 name: Test and build container image
 on:
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   push:
     branches: ['**']
     tags: ['v*']
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
 permissions:
   contents: read

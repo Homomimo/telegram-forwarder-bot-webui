@@ -49,4 +49,4 @@ docker logs tdl-forwarder
 
 ## 发布镜像
 
-推送代码后，GitHub Actions 会运行检查。发布时确保 `VERSION` 与 Git 标签一致，例如 `VERSION` 为 `1.0.0` 时推送标签 `v1.0.0`；成功后镜像发布到 GHCR。
+分支推送或 PR 如果只改 Markdown 文件或 `docs/` 目录，不会触发 GitHub Actions；同时改动代码或配置时仍会运行检查。发布时确保 `VERSION` 与 Git 标签一致，例如 `VERSION` 为 `1.0.0` 时推送标签 `v1.0.0`；成功后镜像发布到 GHCR。
