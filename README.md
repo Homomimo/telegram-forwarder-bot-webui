@@ -40,10 +40,21 @@ docker logs telegram-forwarder-bot
 3. 在网页设置转发目标和监听来源。也可在 Bot 中用 `/forwardto <频道ID>` 设置目标，用 `/monitor add <频道ID>` 添加来源。
 4. 先在自己的测试频道验证，再用于正式频道。只转发你有权复制的内容。
 
+## 在 VPS 上更新
+
+镜像发布后不会自动替换运行中的容器。先在 Bot 中用 `/queue` 确认没有正在转发或等待的任务，再以 **root** 在 VPS 上执行（需要 Python 3、curl 和 GNU tar，无需克隆仓库或重填 Token）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homomimo/telegram-forwarder-bot-webui/main/update.sh -o /root/telegram-forwarder/update.sh && sh /root/telegram-forwarder/update.sh
+```
+
+脚本拉取 `latest`；镜像没变就不停机。有更新时先停机备份 `/data` 到 `/root/telegram-forwarder/backups/`，再用原凭据、端口和挂载启动新容器。看到「更新成功」表示已收到 Bot 就绪日志，且容器内的 WebUI 检查通过。可再发送 `/start` 并打开 WebUI，验证外部访问。
+
+若备份、启动或就绪检查失败，脚本会尝试重新启动旧容器，**不会自动还原数据库**，以免重复投递。若 VPS 断电或回退失败，先用 `docker ps -a` 检查正式容器和 `.previous`、`.next`；不要同时启动两个实例。备份含账号会话与密码，请妥善保管，按需清理。
+
 ## 注意事项
 
 - `ADMIN_IDS` 填 Telegram **用户 ID**，不是频道 ID；多个管理员用逗号分隔。
 - `API_ID` 和 `API_HASH` 从 Telegram 应用设置获取；不能用 Bot Token 代替。
 - 数据保存在 `/root/telegram-forwarder/data`。同一数据目录不要同时运行多个容器；备份前先停止容器。
 - 发送结果不确定时，任务会保留待核对状态，不会自动重发。核对目标频道后再处理，避免重复发送。
-- `latest` 指向最新发布版本；运行中的容器不会自动更新，更新时需重新拉取镜像并重建容器。
