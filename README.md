@@ -57,4 +57,5 @@ curl -fsSL https://raw.githubusercontent.com/Homomimo/telegram-forwarder-bot-web
 - `ADMIN_IDS` 填 Telegram **用户 ID**，不是频道 ID；多个管理员用逗号分隔。
 - `API_ID` 和 `API_HASH` 从 Telegram 应用设置获取；不能用 Bot Token 代替。
 - 数据保存在 `/root/telegram-forwarder/data`。同一数据目录不要同时运行多个容器；备份前先停止容器。
+- `/queue` 显示「等待相册补齐」时，如果目标频道没有这组消息，先在源频道数清这一个相册的项数，再私聊 Bot 发送 `/queue album <任务ID> <实际项数>`（2–10）。数量不符不会发送。不要另外手动转发同一相册。
 - 发送结果不确定时，任务会保留待核对状态，不会自动重发。核对目标频道后再处理，避免重复发送。
