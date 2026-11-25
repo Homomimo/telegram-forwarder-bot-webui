@@ -101,6 +101,25 @@ class LoginTest(unittest.TestCase):
             client.disconnect.assert_awaited_once()
             client.sign_in.assert_awaited_once_with(password="synthetic-password")
 
+    def test_first_telethon_login_uses_container_credentials_unless_both_are_overridden(self):
+        configured = {"API_ID": "123", "API_HASH": "a" * 32}
+        with tempfile.TemporaryDirectory() as td, patch.dict(a.os.environ, configured):
+            data = Path(td)
+            for fields, expected in [
+                ({"api_id": "", "api_hash": ""}, (123, "a" * 32)),
+                ({"api_id": "456", "api_hash": "b" * 32}, (456, "b" * 32)),
+            ]:
+                manager = a.Manager()
+                with patch.object(a, "telethon_login", new_callable=AsyncMock) as login:
+                    response = manager.command("start", {"provider": "telethon", **fields}, data, "tdl")
+                    self.finish(manager)
+                    self.assertEqual(response, {"flow": manager.flow.id})
+                    login.assert_awaited_once_with(manager.flow, data / "accounts", "tdl", expected)
+
+            for partial in ({"api_id": "456"}, {"api_hash": "b" * 32}):
+                with self.assertRaisesRegex(ValueError, "同时填写"):
+                    a.Manager().command("start", {"provider": "telethon", **partial}, data, "tdl")
+
     def test_relogin_requires_confirmation_and_reuses_application_credentials(self):
         with tempfile.TemporaryDirectory() as td:
             data = Path(td)
@@ -125,7 +144,8 @@ class LoginTest(unittest.TestCase):
                 # A close request arriving after publication must not turn success into cancellation.
                 m.command("cancel", {"flow": f.id}, data, binary)
 
-            with patch.object(a, "telethon_login", authenticate):
+            configured = {"API_ID": "456", "API_HASH": "b" * 32}
+            with patch.dict(a.os.environ, configured), patch.object(a, "telethon_login", authenticate):
                 m.command("start", {"provider": "telethon", "replace": True}, data, "tdl")
                 self.finish(m)
             self.assertEqual(received, [(123, "a" * 32)])
