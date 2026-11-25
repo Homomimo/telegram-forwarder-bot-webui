@@ -4,16 +4,15 @@
 
 ## 一键启动
 
-将命令中的示例值替换为自己的信息。开放 VPS 的 TCP **8766** 端口，建议只允许自己的 IP 访问。
+将命令中的示例值替换为自己的信息。开放 VPS 的 TCP **8765** 端口，建议只允许自己的 IP 访问。
 
 ```bash
 docker run -d --init --restart unless-stopped \
-  --name tdl-forwarder \
+  --name telegram-forwarder-bot \
   --security-opt no-new-privileges \
   --log-opt max-size=10m --log-opt max-file=3 \
-  -p 8766:8765 \
+  -p 8765:8765 \
   -v /root/telegram-forwarder/data:/data \
-  -e RELAY_MODE=live \
   -e RELAY_VPS_IP='你的VPS公网IPv4' \
   -e API_ID='你的API_ID' \
   -e API_HASH='你的API_HASH' \
@@ -25,10 +24,10 @@ docker run -d --init --restart unless-stopped \
 Docker 会自动拉取镜像并启动。查看登录密码：
 
 ```bash
-docker logs tdl-forwarder
+docker logs telegram-forwarder-bot
 ```
 
-打开 `https://你的VPS公网IPv4:8766`，首次访问时核对浏览器证书指纹与日志中的 `HTTPS SHA256`。使用用户名 `admin` 和日志中的 `Web password` 登录。
+打开 `https://你的VPS公网IPv4:8765`，首次访问时核对浏览器证书指纹与日志中的 `HTTPS SHA256`。使用用户名 `admin` 和日志中的 `Web password` 登录。
 
 > 命令中的凭据会留在终端历史中，也可被有 Docker 管理权限的人通过 `docker inspect` 查看。请勿公开日志或泄露凭据。
 
@@ -46,7 +45,3 @@ docker logs tdl-forwarder
 - 数据保存在 `/root/telegram-forwarder/data`。同一数据目录不要同时运行多个容器；备份前先停止容器。
 - 发送结果不确定时，任务会保留待核对状态，不会自动重发。核对目标频道后再处理，避免重复发送。
 - `latest` 指向最新发布版本；运行中的容器不会自动更新，更新时需重新拉取镜像并重建容器。
-
-## 发布镜像
-
-分支推送或 PR 如果只改 Markdown 文件或 `docs/` 目录，不会触发 GitHub Actions；同时改动代码或配置时仍会运行检查。发布时确保 `VERSION` 与 Git 标签一致，例如 `VERSION` 为 `1.0.0` 时推送标签 `v1.0.0`；成功后镜像发布到 GHCR。

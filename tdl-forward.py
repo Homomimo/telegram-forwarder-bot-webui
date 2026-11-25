@@ -1993,8 +1993,6 @@ class TelegramBot:
         ref = parse_reference(value)
         if isinstance(ref.peer, int):
             return ref.peer, ''
-        if hasattr(self, 'demo_transport'):
-            return self.demo_transport.public_channel(ref.peer)
         client = self.user_client if self.is_user_monitor_active() else self.client
         if not client.is_connected():
             raise ValueError('Telegram 账号尚未连接；可以直接填写频道数字 ID。')

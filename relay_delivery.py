@@ -73,31 +73,28 @@ async def plan(bot, task, export):
             str(channel) if channel else "@" + urlsplit(task.link).path.split("/")[1]
         )
     low, high = max(1, first - 100), min(2**31 - 1, last + 100)
-    if hasattr(bot, "demo_transport"):
-        data = bot.demo_transport.export(source, low, high)
-    else:
-        if not accounts.summary(bot.console_data)["tdl"]:
-            raise ValueError("请先在网页设置中扫码登录 TDL 账号")
-        code, _, _ = await bot.tdl._run_command(
-            [
-                bot.tdl.tdl_path,
-                "chat",
-                "export",
-                "-c",
-                source,
-                "-T",
-                "id",
-                "--all",
-                "--raw",
-                "-i",
-                f"{low},{high}",
-                "-o",
-                export,
-            ]
-        )
-        if code:
-            raise ValueError("无法读取源频道，请检查 TDL 授权与频道权限；未发送")
-        data = json.loads(Path(export).read_text("utf-8-sig"))
+    if not accounts.summary(bot.console_data)["tdl"]:
+        raise ValueError("请先在网页设置中扫码登录 TDL 账号")
+    code, _, _ = await bot.tdl._run_command(
+        [
+            bot.tdl.tdl_path,
+            "chat",
+            "export",
+            "-c",
+            source,
+            "-T",
+            "id",
+            "--all",
+            "--raw",
+            "-i",
+            f"{low},{high}",
+            "-o",
+            export,
+        ]
+    )
+    if code:
+        raise ValueError("无法读取源频道，请检查 TDL 授权与频道权限；未发送")
+    data = json.loads(Path(export).read_text("utf-8-sig"))
     resolved = data.get("id")
     if type(resolved) is not int or resolved <= 0 or (channel and channel != resolved):
         raise ValueError("导出频道与任务不符，未发送")
@@ -116,8 +113,6 @@ async def plan(bot, task, export):
 
 
 async def clone(bot, task, channel, ids, target=None, actor=None):
-    if hasattr(bot, "demo_transport"):
-        return await bot.demo_transport.clone(ids)
     request = SimpleNamespace(
         channel=channel, ids=ids, grouped=len(ids) > 1, target=target, actor=actor
     )

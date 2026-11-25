@@ -82,7 +82,6 @@ function modal(title, html, ok, fn) {
   if (!$("#dlg").open) $("#dlg").showModal();
 }
 function accountCards() {
-  const demo = s.mode === "demo";
   return `<section class="card">${head("ACCOUNT ACCESS", "账号登录")}<div class="authgrid">${[
     "tdl",
     "telethon",
@@ -91,9 +90,9 @@ function accountCards() {
       const saved = s.accounts?.[k];
       const action = btn(
         i ? "telethonLogin" : "tdlLogin",
-        demo ? "查看扫码步骤" : saved ? "重新扫码登录" : "扫码登录",
+        saved ? "重新扫码登录" : "扫码登录",
       );
-      return `<div class="authcard"><div class="cardhead"><span class="authmark">${i ? "TH" : "TD"}</span>${tag(saved ? "on" : "off", demo ? "离线预览" : saved ? "会话已保存" : "未配置")}</div><h3>${i ? "Telethon 用户会话" : "TDL 转发账号"}</h3><p class="hint">${i ? "保存用户会话后自动连接，仅监听已启用的源频道。无用户会话时仍可用 Bot 监听；遇到禁转需要已授权的 TDL。" : "手动转发必需 · 容器已内置 TDL，无需在宿主机安装或执行登录命令。"}</p>${i && !demo ? `<p class="note">监听状态：${esc(s.listener_status)}</p>` : ""}${saved ? "<small>会话已保存不代表授权有效；失效后可重新扫码。</small>" : ""}<div class="card-actions">${action}</div></div>`;
+      return `<div class="authcard"><div class="cardhead"><span class="authmark">${i ? "TH" : "TD"}</span>${tag(saved ? "on" : "off", saved ? "会话已保存" : "未配置")}</div><h3>${i ? "Telethon 用户会话" : "TDL 转发账号"}</h3><p class="hint">${i ? "保存用户会话后自动连接，仅监听已启用的源频道。无用户会话时仍可用 Bot 监听；遇到禁转需要已授权的 TDL。" : "手动转发必需 · 容器已内置 TDL，无需在宿主机安装或执行登录命令。"}</p>${i ? `<p class="note">监听状态：${esc(s.listener_status)}</p>` : ""}${saved ? "<small>会话已保存不代表授权有效；失效后可重新扫码。</small>" : ""}<div class="card-actions">${action}</div></div>`;
     })
     .join("")}</div></section>`;
 }
@@ -126,8 +125,7 @@ const tag = (k, t) => `<span class="tag ${k}">${esc(t)}</span>`;
 function draw() {
   if (!s) return;
   $("#version").textContent = s.version;
-  $("#engine").textContent =
-    s.mode === "demo" ? "离线演示" : "Bot 与网页共用队列";
+  $("#engine").textContent = "Bot 与网页共用队列";
   $("#nav").innerHTML = Object.entries(pages)
     .map(
       ([k, t]) =>
@@ -175,11 +173,6 @@ function draw() {
   );
   let body = "";
   if (page === "home") {
-    if (s.mode === "demo")
-      body += card(
-        "离线演示",
-        `<p>以下操作只写入演示数据，不连接 Telegram。模拟源 9876543210：40 是单帖，41–43 是相册，45–46 是禁止转发的相册，47 模拟回执丢失。</p><div class="actions">${btn("demoRange", "从网页转发 40–46", "primary")}${btn("demoBot", "模拟 Bot 范围命令")}${btn("demoPartial", "尝试截断相册")}${btn("demoUnknown", "模拟回执丢失")}</div>`,
-      );
     body += card(
       "当前运行状态",
       `${pair("目标频道", channelLabel(config.target))}${pair("排队 / 待核对", `${q.counts.queued} / ${s.review_total}`)}${pair("当前任务", q.current_task ? "#" + q.current_task.job_id : "空闲")}`,
@@ -214,7 +207,7 @@ function draw() {
     body += accountCards();
   }
   $("#page").innerHTML =
-    `<div class="rowhead"><div><h1>${pages[page]}</h1><div class="sub">${s.mode === "demo" ? "演示环境 · 不会真实发送" : "真实环境 · 请仅转发获授权的内容"}</div></div>${btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
+    `<div class="rowhead"><div><h1>${pages[page]}</h1><div class="sub">请仅转发获授权的内容</div></div>${btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
 }
 async function refresh(force = false) {
   if (!signedIn || (fetching && !force)) return;
@@ -235,7 +228,7 @@ async function refresh(force = false) {
     fetching = false;
   }
 }
-function newTask(kind = "link", start = "", end = "") {
+function newTask() {
   const target = s.config.target;
   if (!target) return handlers.target();
   const key = Array.from(crypto.getRandomValues(new Uint8Array(16)), (n) =>
@@ -243,7 +236,7 @@ function newTask(kind = "link", start = "", end = "") {
   ).join("");
   modal(
     "新建转发",
-    `<div class="note">目标：${esc(channelLabel(target))} · 相册整组发送，?single 仅发选中成员。</div><label>任务类型<select name="kind" id="kind"><option value="link">链接或相册</option><option value="range" ${kind === "range" ? "selected" : ""}>历史范围</option></select></label>${field("源帖链接", "src", "https://t.me/c/9876543210/40", start ? "https://t.me/c/9876543210/" + start : "")}<label id="endRow" ${kind === "range" ? "" : "hidden"}>结束消息 ID<input name="end" inputmode="numeric" value="${esc(end)}"></label>`,
+    `<div class="note">目标：${esc(channelLabel(target))} · 相册整组发送，?single 仅发选中成员。</div><label>任务类型<select name="kind" id="kind"><option value="link">链接或相册</option><option value="range">历史范围</option></select></label>${field("源帖链接", "src", "https://t.me/channel_name/123")}<label id="endRow" hidden>结束消息 ID<input name="end" inputmode="numeric"></label>`,
     "确认入队",
     async (p) => {
       const r = await act("submit", { ...p, target, key });
@@ -260,7 +253,6 @@ function configureChannel(isTarget) {
   const op = isTarget ? "target" : "add-source";
   const key = isTarget ? "target" : "source";
   const initial = isTarget && previous ? markedId(previous) : "";
-  const demoHint = s.mode === "demo" ? " 离线用户名可试 @demo_news。" : "";
   modal(
     title,
     field(
@@ -269,7 +261,7 @@ function configureChannel(isTarget) {
       "https://t.me/c/1234567890/",
       initial,
     ) +
-      `<small>支持公开频道、私有频道和原帖链接，不接受邀请链接。${demoHint}</small>`,
+      `<small>支持公开频道、私有频道和原帖链接，不接受邀请链接。</small>`,
     "识别频道",
     async (p) => {
       const dialogGeneration = generation;
@@ -277,16 +269,12 @@ function configureChannel(isTarget) {
       if (generation !== dialogGeneration || !$("#dlg").open) return false;
       const id = preview.channel;
       const resolved = preview.title ? pair("频道名称", preview.title) : "";
-      const status =
-        s.mode === "demo"
-          ? "离线演示，未连接 Telegram，未验证读写权限。"
-          : "已识别频道 ID，尚未验证监听或发帖权限。";
       modal(
         title,
         resolved +
           pair("Telegram ID", markedId(id)) +
           pair("频道裸 ID", id) +
-          `<p class="hint">${status}</p>` +
+          '<p class="hint">已识别频道 ID，尚未验证监听或发帖权限。</p>' +
           nameField(
             preview.name || Array.from(preview.title).slice(0, 48).join(""),
           ),
@@ -300,19 +288,6 @@ function configureChannel(isTarget) {
 }
 const handlers = {
   new: () => newTask(),
-  demoRange: () => newTask("range", 40, 46),
-  demoPartial: () => newTask("range", 42, 46),
-  demoUnknown: () => newTask("link", 47),
-  demoBot: () =>
-    modal(
-      "模拟 Bot 命令",
-      "<p>/export_range 9876543210 40 46</p><p>通过真实 Bot 命令处理器入队，投递由离线模拟器完成。</p>",
-      "执行",
-      async () => {
-        await act("demo-bot");
-        notify("已提交演示命令");
-      },
-    ),
   target: () => configureChannel(true),
   rename: (id) => {
     const previous = s.channel_names[id] || "";
@@ -398,21 +373,6 @@ function openLogin(provider) {
       (tele ? "Telethon" : "TDL") + (replace ? " 重新扫码登录" : " 扫码登录");
   const steps =
     "<p>在已登录的 Telegram 手机上打开「设置 → 设备 → 连接桌面设备」，扫描本窗口的二维码并确认。</p>";
-  if (s.mode === "demo") {
-    modal(
-      title,
-      '<div class="note">离线预览 · 不生成登录码，不收集任何凭据。</div>' +
-        steps +
-        '<p class="hint">用真实模式启动容器，以 admin 登录后再来这里。' +
-        (tele
-          ? "准备自己的 Telegram API ID 和 API Hash；会话字符串只保存在服务端。"
-          : "先完成 TDL 授权，再设置转发目标。") +
-        "</p>",
-      null,
-      null,
-    );
-    return;
-  }
   const my = ++generation;
   const applicationFields = `<label>API ID<input name="api_id" ${replace ? "" : "required"} inputmode="numeric" pattern="[1-9][0-9]{0,9}"></label><label>API Hash<input name="api_hash" ${replace ? "" : "required"} type="password" pattern="[0-9A-Fa-f]{32}" autocomplete="off"></label><small class="hint">在 my.telegram.org/apps 获取自己的应用凭据。</small>`;
   modal(
@@ -569,13 +529,12 @@ function loginScreen(message = "") {
   $("#see").setAttribute("aria-pressed", "false");
   $("#loginerr").textContent = message;
 }
-async function enter(openDemo = false) {
+async function enter() {
   signedIn = true;
   authEpoch++;
   $("#pwd").value = "";
   $("#gate").hidden = true;
   $("#workspace").hidden = false;
-  $("#out").hidden = openDemo;
   go(location.hash.slice(1));
   await refresh(true);
 }
@@ -586,7 +545,7 @@ async function boot() {
     const v = await r.json();
     if (!v.authenticated) return loginScreen();
     csrf = v.csrf || "";
-    await enter(v.open_demo);
+    await enter();
   } catch {
     loginScreen("无法连接服务器，请检查连接后重试。");
   }

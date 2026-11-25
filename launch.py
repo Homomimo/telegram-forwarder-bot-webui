@@ -11,17 +11,16 @@ import ssl
 import hashlib
 import sys
 import threading
-from http.server import ThreadingHTTPServer
 
 import accounts
 from console_http import Console, Handler
 import vps_https
 
 
-def prepare_data(mode):
+def prepare_data():
     base = Path(os.getenv("RELAY_DATA", "/data")).resolve()
     base.mkdir(parents=True, exist_ok=True)
-    data = base / mode
+    data = base / "live"
     if data.is_symlink():
         raise ValueError("数据目录不能是符号链接")
     data.mkdir(mode=0o700, exist_ok=True)
@@ -83,21 +82,8 @@ async def refresh_account(bot, path):
             accounts.runtime_lock.release()
 
 
-async def serve(mode, data):
-    if mode == "demo":
-        from demo_transport import DemoTransport
-
-        # Even if someone passes a real token, the demo does not load or use it.
-        os.environ.update(
-            API_ID="1",
-            API_HASH="0" * 32,
-            ADMIN_IDS="1",
-            BOT_TOKEN="",
-            FORWARD_TO_CHAT_ID="1234567890",
-            USER_SESSION_STRING="",
-            MONITOR_CHAT_IDS="",
-        )
-    elif not all(
+async def serve(data):
+    if not all(
         os.environ.get(k, "").strip()
         for k in ("BOT_TOKEN", "ADMIN_IDS", "API_ID", "API_HASH")
     ):
@@ -114,7 +100,7 @@ async def serve(mode, data):
     core = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = core
     spec.loader.exec_module(core)
-    if mode == "live" and (
+    if (
         not core.ADMIN_IDS
         or core.API_ID <= 0
         or not core.re.fullmatch("[a-fA-F0-9]{32}", core.API_HASH)
@@ -157,34 +143,18 @@ async def serve(mode, data):
         bot.channel_names = {
             saved_id(cid): name for cid, name in saved.get("names", {}).items()
         }
-    elif mode == "demo":
-        source = DemoTransport.source
-        bot.update_channels(
-            sources=[source], names={source: "演示素材", bot.target_chat_id: "演示归档"}
-        )
     else:
         bot.update_channels()
-    if mode == "demo":
-        bot.demo_transport = bot.client = DemoTransport(bot.task_queue)
     addr = (os.getenv("BIND", "127.0.0.1"), int(os.getenv("PORT", "8765")))
     ip = os.getenv("RELAY_VPS_IP")
-    if ip:
-        ip = vps_https.validate_ip(ip, "live", password)
-        server = vps_https.IPHTTPSServer(
-            addr, Handler, ip, vps_https.tls_context(data, ip)
-        )
-        cert = (data / "tls" / ip / "cert.pem").read_text("ascii")
-        print(
-            "HTTPS SHA256:",
-            hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest(),
-            flush=True,
-        )
-    elif mode == "live":
-        raise SystemExit("真实模式必须填写 RELAY_VPS_IP 并使用 HTTPS")
-    else:
-        server = ThreadingHTTPServer(addr, Handler)
-    server.console, server.password = Console(bot, core, mode, data), password
-    print(f"[{mode}] Web 管理员: admin", flush=True)
+    if not ip:
+        raise SystemExit("必须填写 RELAY_VPS_IP 并使用 HTTPS")
+    ip = vps_https.validate_ip(ip, password)
+    server = vps_https.IPHTTPSServer(addr, Handler, ip, vps_https.tls_context(data, ip))
+    cert = (data / "tls" / ip / "cert.pem").read_text("ascii")
+    print("HTTPS SHA256:", hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest(), flush=True)
+    server.console, server.password = Console(bot, core, data), password
+    print("[live] Web 管理员: admin", flush=True)
     if os.getenv("RELAY_LOG_PASSWORD", "1") == "1":
         print("Web password:", password, flush=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -195,19 +165,12 @@ async def serve(mode, data):
             loop.add_signal_handler(sig, stop.set)
         except NotImplementedError:
             pass
-    tasks = [asyncio.create_task(stop.wait())]
+    tasks = [
+        asyncio.create_task(stop.wait()),
+        asyncio.create_task(refresh_account(bot, data / "accounts" / "telethon.json")),
+        asyncio.create_task(bot.start()),
+    ]
     try:
-        if mode == "demo":
-            await bot.task_queue.start()
-        else:
-            tasks.extend(
-                [
-                    asyncio.create_task(
-                        refresh_account(bot, data / "accounts" / "telethon.json")
-                    ),
-                    asyncio.create_task(bot.start()),
-                ]
-            )
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
@@ -224,15 +187,14 @@ async def serve(mode, data):
 
 if __name__ == "__main__":
     os.umask(0o077)
-    mode = os.getenv("RELAY_MODE", "demo")
-    if mode not in ("demo", "live"):
-        raise SystemExit("RELAY_MODE 必须为 demo 或 live")
-    if mode == "live" and not Path("/usr/local/bin/tdl").is_file():
-        raise SystemExit("需要完整的 live 镜像；Demo 镜像不可用于发送")
-    data = prepare_data(mode)
+    if os.getenv("RELAY_MODE", "live") != "live":
+        raise SystemExit("RELAY_MODE 只支持 live，未启动服务")
+    if not Path("/usr/local/bin/tdl").is_file():
+        raise SystemExit("镜像缺少 /usr/local/bin/tdl")
+    data = prepare_data()
     with lock_instance(data):
         try:
-            restart = asyncio.run(serve(mode, data))
+            restart = asyncio.run(serve(data))
         except Exception as exc:
             raise SystemExit(
                 f"启动或运行失败（{type(exc).__name__}），请检查凭据、数据权限、端口与网络。"

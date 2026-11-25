@@ -7,5 +7,3 @@
 !tdl_patch/**
 !static/
 !static/**
-!tools/
-!tools/verify_demo.py

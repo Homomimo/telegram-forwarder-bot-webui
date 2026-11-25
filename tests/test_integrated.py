@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from telethon import types
+
 import bot_fixture as fixtures
 from clone_receipts import Delivered
 from relay_delivery import album_batches
@@ -24,7 +26,7 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         from console_http import Console
 
         bot = self.bot
-        console = Console(bot, app, "demo", bot.console_data)
+        console = Console(bot, app, bot.console_data)
         bot.task_queue.running = True
         target = bot.target_chat_id  # Marked ID; the same source uses its bare ID.
         await console.command("add-source", {"source": str(TARGET), "name": "同名频道"})
@@ -58,7 +60,7 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         from console_http import Console
 
         bot = self.bot
-        console = Console(bot, app, "demo", bot.console_data)
+        console = Console(bot, app, bot.console_data)
         bot.task_queue.running = True
         payload = {"channel": str(SOURCE), "name": "新的备注"}
         await console.command("channel-name", payload)
@@ -80,25 +82,26 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
 
     async def test_channel_inputs_converge_without_network_or_duplicate_monitor(self):
         from console_http import Console
-        from demo_transport import DemoTransport
 
         bot = self.bot
         bot.task_queue.running = True
-        bot.demo_transport = DemoTransport(bot.task_queue)
-        console = Console(bot, app, "demo", bot.console_data)
+        bot.client.get_entity.return_value = types.Channel(
+            2345678901, "测试频道", types.ChatPhotoEmpty(), None, broadcast=True
+        )
+        console = Console(bot, app, bot.console_data)
         forms = [
             "2345678901",
             "-1002345678901",
             "https://t.me/c/2345678901/",
             "https://t.me/c/2345678901/42",
-            "@demo_news",
-            "https://t.me/DEMO_NEWS/",
-            "https://t.me/demo_news/42",
+            "@test_news",
+            "https://t.me/TEST_NEWS/",
+            "https://t.me/test_news/42",
         ]
         for ref in forms:
             info = await console.command("preview-channel", {"channel": ref})
             self.assertEqual(info["channel"], "2345678901")
-        self.assertEqual(info["title"], "演示快讯")
+        self.assertEqual(info["title"], "测试频道")
         self.assertEqual(bot.monitor_chat_ids, [SOURCE])
         await console.command(
             "add-source", {"source": "https://t.me/c/2345678901/42", "name": "快讯"}
@@ -107,6 +110,8 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
             await console.command("add-source", {"source": "-1002345678901"})
         self.assertEqual(bot.channel_names[2345678901], "快讯")
         await console.command("remove-source", {"source": "-1002345678901"})
+        bot.client.get_entity.reset_mock()
+        bot.client.get_entity.side_effect = ValueError("unknown channel")
         for bad in (
             "-1234567890",
             "https://t.me/+abc123",
@@ -119,21 +124,21 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
             with self.subTest(ref=bad), self.assertRaises(ValueError):
                 await console.command("preview-channel", {"channel": bad})
         self.assertEqual(bot.monitor_chat_ids, [SOURCE])
-        bot.client.get_entity.assert_not_awaited()
+        bot.client.get_entity.assert_awaited_once_with("@unknown_channel")
 
     async def test_public_bot_confirmation_uses_pinned_id_not_a_second_lookup(self):
-        from demo_transport import DemoTransport
-
         bot = self.bot
-        bot.demo_transport = DemoTransport(bot.task_queue)
+        bot.client.get_entity.return_value = types.Channel(
+            2345678901, "测试频道", types.ChatPhotoEmpty(), None, broadcast=True
+        )
         reply = AsyncMock()
         event = SimpleNamespace(sender_id=61)
         with patch.object(app, "ADMIN_IDS", [61]):
             await bot.run_admin_action(
-                event, ["/monitor", "add", "https://t.me/demo_news/42"], reply
+                event, ["/monitor", "add", "https://t.me/test_news/42"], reply
             )
             self.assertEqual(bot.monitor_chat_ids, [SOURCE])
-            self.assertIn("演示快讯", reply.await_args.args[0])
+            self.assertIn("测试频道", reply.await_args.args[0])
             cmd = reply.await_args.args[0].splitlines()[-1].split()
             self.assertEqual(cmd, ["/monitor", "add", "2345678901"])
             await bot.run_admin_action(event, cmd, reply)
@@ -141,12 +146,11 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
                 event, ["/monitor", "set", "-1002345678901,2345678901"], reply
             )
         self.assertEqual(bot.monitor_chat_ids, [2345678901])
+        bot.client.get_entity.assert_awaited_once_with("@test_news")
 
     async def test_public_lookup_rejects_nonchannel_and_invite_never_reaches_client(
         self,
     ):
-        from telethon import types
-
         self.bot.client.get_entity.return_value = types.User(id=7)
         with self.assertRaisesRegex(ValueError, "不是广播频道"):
             await self.bot.resolve_channel("https://t.me/some_user/42")

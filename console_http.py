@@ -3,12 +3,10 @@
 import asyncio
 import hmac
 import json
-import os
 import re
 import sqlite3
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from types import SimpleNamespace
 from urllib.parse import urlsplit
 import accounts
 from channel_input import numeric_channel, parse_reference
@@ -25,8 +23,8 @@ def check(ok, message):
 
 
 class Console:
-    def __init__(self, bot, core, mode, data):
-        self.bot, self.core, self.mode, self.data = bot, core, mode, data
+    def __init__(self, bot, core, data):
+        self.bot, self.core, self.data = bot, core, data
         self.loop = asyncio.get_running_loop()
 
     def dispatch(self, op, payload=None):
@@ -63,7 +61,7 @@ class Console:
             ]
             total, reviews = queue.journal.reviews(limit=100)
             return dict(
-                mode=self.mode,
+                mode="live",
                 version=VERSION,
                 config={"target": str(bot.target_chat_id or "")},
                 channel_names={
@@ -79,7 +77,7 @@ class Console:
                 review_total=total,
                 history=recent,
                 sources=bot.monitor_chat_ids,
-                accounts=accounts.summary(self.data) if self.mode == "live" else {},
+                accounts=accounts.summary(self.data),
                 listener_status="用户会话已连接"
                 if bot.is_user_monitor_active()
                 else "仅 Bot / 用户会话未连接",
@@ -118,7 +116,7 @@ class Console:
                 "请输入完整有效的源帖链接",
             )
             check(
-                self.mode == "demo" or accounts.summary(self.data)["tdl"],
+                accounts.summary(self.data)["tdl"],
                 "请先在设置中扫码登录 TDL",
             )
             check(p.get("kind") in ("link", "range"), "未知任务类型")
@@ -187,19 +185,6 @@ class Console:
                 [int(p["id"])], current_id=getattr(queue.current_task, "job_id", None)
             )
             check(changed, "任务不是待核对状态")
-        elif op == "demo-bot" and self.mode == "demo":
-            # Exercise the real Bot command handler, without a Telegram connection.
-            async def reply(*args, **kwargs):
-                pass
-
-            event = SimpleNamespace(
-                sender_id=self.core.ADMIN_IDS[0],
-                chat_id=self.core.ADMIN_IDS[0],
-                respond=reply,
-            )
-            await bot.run_admin_action(
-                event, ["/export_range", "9876543210", "40", "46"], reply
-            )
         else:
             raise ValueError("不支持此操作")
 
@@ -231,26 +216,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def allowed(self):
         authority = self.headers.get("Host", "")
-        host = authority.split(":")[0].lower()
-        vps_ip = getattr(self.server, "vps_ip", None)
-        if vps_ip:
-            valid_host = (
-                re.fullmatch(re.escape(vps_ip) + r"(?::[0-9]{1,5})?", authority)
-                is not None
-            )
-        else:
-            valid_host = host in {
-                "localhost",
-                "127.0.0.1",
-                os.getenv("RELAY_HOST", "localhost").lower(),
-            }
+        valid_host = re.fullmatch(re.escape(self.server.vps_ip) + r"(?::[0-9]{1,5})?", authority)
         if len(self.headers.get_all("Host", [])) != 1 or not valid_host:
             self.reply(403, {"error": "不允许的 Host"})
             return False
         return True
-
-    def open_demo(self):
-        return False
 
     def token(self):
         return web_sessions.cookie_token(self.headers.get("Cookie"))
@@ -259,9 +229,7 @@ class Handler(BaseHTTPRequestHandler):
         return SESSIONS.csrf(self.token())
 
     def make_cookie(self, token, age=None):
-        value = f"{web_sessions.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict"
-        if getattr(self.server, "vps_ip", None):
-            value += "; Secure"
+        value = f"{web_sessions.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Secure"
         return value if age is None else value + f"; Max-Age={age}"
 
     def do_GET(self):
@@ -272,17 +240,9 @@ class Handler(BaseHTTPRequestHandler):
             csrf = self.session()
             return self.reply(
                 200,
-                {
-                    "authenticated": self.open_demo() or bool(csrf),
-                    "open_demo": self.open_demo(),
-                    "csrf": csrf,
-                },
+                {"authenticated": bool(csrf), "csrf": csrf},
             )
-        if (
-            (path.startswith("/api/") or path == "/health")
-            and not self.open_demo()
-            and not self.session()
-        ):
+        if (path.startswith("/api/") or path == "/health") and not self.session():
             return self.reply(401, {"error": "请先登录工作台"})
         if path == "/api/state":
             try:
@@ -290,9 +250,7 @@ class Handler(BaseHTTPRequestHandler):
             except (TimeoutError, sqlite3.Error, OSError):
                 return self.reply(503, {"error": "队列暂不可用"})
         if path == "/health":
-            return self.reply(
-                200, {"mode": self.server.console.mode, "version": VERSION}
-            )
+            return self.reply(200, {"mode": "live", "version": VERSION})
         files = {
             "/": ("index.html", "text/html; charset=utf-8"),
             "/ui.css": ("ui.css", "text/css"),
@@ -310,12 +268,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         origin = self.headers.get("Origin")
-        same_origin = True
-        if origin:
-            if getattr(self.server, "vps_ip", None):
-                same_origin = origin == "https://" + self.headers["Host"]
-            else:
-                same_origin = origin == "http://" + self.headers["Host"]
+        same_origin = not origin or origin == "https://" + self.headers["Host"]
         if (
             self.headers.get("X-Relay-Request") != "1"
             or self.headers.get_content_type() != "application/json"
@@ -357,27 +310,20 @@ class Handler(BaseHTTPRequestHandler):
                         token, web_sessions.TTL if p.get("remember") is True else None
                     ),
                 )
-            if not self.open_demo():
-                csrf = self.session()
-                if csrf is None:
-                    return self.reply(401, {"error": "请重新登录工作台"})
-                if not hmac.compare_digest(
-                    csrf.encode(), self.headers.get("X-CSRF-Token", "").encode()
-                ):
-                    return self.reply(403, {"error": "会话校验失败，请刷新页面"})
+            csrf = self.session()
+            if csrf is None:
+                return self.reply(401, {"error": "请重新登录工作台"})
+            if not hmac.compare_digest(
+                csrf.encode(), self.headers.get("X-CSRF-Token", "").encode()
+            ):
+                return self.reply(403, {"error": "会话校验失败，请刷新页面"})
             if self.path == "/api/auth/logout":
                 SESSIONS.revoke(self.token())
                 return self.reply(200, {"ok": True}, cookie=self.make_cookie("", 0))
             if self.path.startswith("/api/login/"):
                 check(
-                    self.server.console.mode == "live"
-                    and len(self.server.password) >= 16,
-                    "离线演示不会请求 Telegram 授权，请以真实模式部署",
-                )
-                check(
-                    getattr(self.server, "vps_ip", None)
-                    or self.headers["Host"].split(":")[0] in ("localhost", "127.0.0.1"),
-                    "请通过配置的 VPS HTTPS 地址或本机入口登录",
+                    len(self.server.password) >= 16,
+                    "网页密码至少需要 16 位",
                 )
                 return self.reply(
                     200,

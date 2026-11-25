@@ -1,16 +1,11 @@
-name: Test and build container image
+name: Build and publish container image
 on:
-  pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-  push:
-    branches: ['**']
-    tags: ['v*']
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号，例如 1.0.1（不带 v）'
+        type: string
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -28,16 +23,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Validate source version and derive image tags
+      - name: Validate release version and derive image tags
         id: image
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: python3 .github/scripts/image_metadata.py
       - name: Check Web JavaScript
         run: node --check static/app.js
-      - name: Build image and verify offline Demo
+      - name: Build image and verify production startup
+        env:
+          APP_VERSION: ${{ steps.image.outputs.version }}
         run: bash .github/scripts/verify-image.sh
 
   publish:
-    if: github.event_name == 'push' && !github.event.deleted && startsWith(github.ref, 'refs/tags/v')
     needs: verify
     concurrency:
       group: ghcr-stable-release
@@ -51,20 +49,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
-      - name: Prevent an older release from replacing latest
-        run: |
-          newest=''
-          while IFS= read -r tag; do
-            if [[ "$tag" =~ ^v[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-              newest=$tag
-              break
-            fi
-          done < <(git tag --list 'v*' --sort=-version:refname)
-          if [[ "$GITHUB_REF_NAME" != "$newest" ]]; then
-            echo "Not publishing $GITHUB_REF_NAME: a newer release tag ($newest) exists." >&2
-            exit 1
-          fi
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
@@ -74,6 +58,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prevent an older release from replacing latest
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          error_log="$RUNNER_TEMP/ghcr-tags-error.log"
+          # Before the first release the package does not exist yet.
+          if tags=$(skopeo list-tags "docker://$image" 2>"$error_log"); then
+            newest=$(jq -r '.Tags[] | select(test("^[1-9][0-9]*\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' <<< "$tags" | sort -V | tail -n 1)
+            if [[ -n "$newest" ]] && dpkg --compare-versions "$VERSION" lt "$newest"; then
+              echo "Not publishing $VERSION: GHCR already has $newest." >&2
+              exit 1
+            fi
+          elif ! grep -Eiq '404|name unknown|name_unknown' "$error_log"; then
+            cat "$error_log" >&2
+            exit 1
+          fi
       - name: Build and publish both architectures
         id: publish
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
