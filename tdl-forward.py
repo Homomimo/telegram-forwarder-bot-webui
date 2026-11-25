@@ -473,10 +473,6 @@ class TaskQueue:
         # Neither early edits nor a running edit's follow-up have a slot in the FIFO.
         return len(self._early_edits) + int(bool(self.current_task and self.current_task.followup))
 
-    async def clear_pending_tasks(self, *, notify: bool = True) -> int:
-        pending, held = self._cancel_pending()
-        return held + await self._finish_pending(pending, notify)
-
     def _cancel_pending(self, stop_current=False):
         self.journal.cancel_waiters(self.current_task.job_id if self.current_task else None,
                                     [t.job_id for t in self._retry_timers.values()], stop_current)
@@ -488,7 +484,7 @@ class TaskQueue:
             self.current_task.edit_dirty = False
         return pending, held
 
-    async def _finish_pending(self, pending, notify: bool) -> int:
+    async def _finish_pending(self, pending) -> int:
         for task in pending:
             if task.mode == 'monitor_edit' and task.verify_edit:
                 task.status, task.error_msg = TaskStatus.UNCONFIRMED, '已停止后续核验；此前编辑结果待核对'
@@ -504,11 +500,10 @@ class TaskQueue:
                     logger.exception("停止任务时清理发送记录失败：%s -> %s", task.link, task.target_chat_id)
                 else:
                     task.rejected_copy = None
-        if notify:
-            for task in pending:
-                msg = await self._get_status(task)
-                await edit_status(msg, "⏹️ " + task.error_msg)
-                self.bot.schedule_status_delete(msg, failed=True)
+        for task in pending:
+            msg = await self._get_status(task)
+            await edit_status(msg, "⏹️ " + task.error_msg)
+            self.bot.schedule_status_delete(msg, failed=True)
         return len(pending)
 
     async def stop_tdl_tasks(self) -> tuple[bool, int]:
@@ -535,7 +530,7 @@ class TaskQueue:
                     msg = await self._get_status(current)
                     await edit_status(msg, '⏹️ ' + (current.error_msg or '停止前已确认送达，请查看转发记录'))
                     self.bot.schedule_status_delete(msg, failed=current.status != TaskStatus.COMPLETED)
-                cleared = await self._finish_pending(pending, True)
+                cleared = await self._finish_pending(pending)
                 return manual, cleared + held
             finally:
                 self._resume.set()
@@ -1960,8 +1955,7 @@ class TelegramBot:
         self.task_queue = TaskQueue(self)
         self.admin_panel = AdminPanel(self, allowed=lambda uid: not self._stopping and uid in ADMIN_IDS,
                                       home=START_MESSAGE_ADMIN, guide=HELP_MESSAGE_ADMIN,
-                                      target_id=parse_chat_id, source_id=parse_monitor_chat_id,
-                                      source_list=parse_monitor_list, post_link=parse_private_channel_link,
+                                      source_id=parse_monitor_chat_id, post_link=parse_private_channel_link,
                                       export_range=parse_export_range_args)
 
     # ── Link utilities ──────────────────────────────────────────

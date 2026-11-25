@@ -13,17 +13,11 @@ const $ = (s) => document.querySelector(s),
         })[c],
     );
 const paths = {
-  storage: "M3 7h7l2-3h8v15H3z M4 10h15",
   home: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
   jobs: "M4 6h16 M4 12h16 M4 18h11",
-  rules: "M3 12h4l3-7 4 14 3-7h4",
   history: "M4 10a8 8 0 1 1 1 7 M4 4v6h6 M12 7v5l4 2",
   settings:
     "M3 6h8m5 0h5 M3 12h2m5 0h11 M3 18h10m5 0h3 M12 3v6 M7 9v6 M15 15v6",
-  send: "m3 11 18-8-6 18-3-8-9-2z M12 13l9-10",
-  check: "m4 12 5 5L20 6",
-  plus: "M12 4v16 M4 12h16",
-  clock: "M12 3a9 9 0 1 1 0 18 9 9 0 1 1 0-18 M12 7v5l3 2",
 };
 function ico(k) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[k]}"/></svg>`;
@@ -82,7 +76,7 @@ function modal(title, html, ok, fn) {
   if (!$("#dlg").open) $("#dlg").showModal();
 }
 function accountCards() {
-  return `<section class="card">${head("ACCOUNT ACCESS", "账号登录")}<div class="authgrid">${[
+  return `<section class="card">${head("账号登录")}<div class="authgrid">${[
     "tdl",
     "telethon",
   ]
@@ -119,7 +113,7 @@ window.addEventListener("hashchange", () => {
 });
 const btn = (a, t, style = "", id = "") =>
   `<button type="button" class="btn ${style}" data-act="${a}" data-id="${esc(id)}">${t}</button>`;
-const head = (_en, t, extra = "") =>
+const head = (t, extra = "") =>
   `<div class="cardhead"><h2>${t}</h2>${extra}</div>`;
 const tag = (k, t) => `<span class="tag ${k}">${esc(t)}</span>`;
 function draw() {
@@ -134,7 +128,7 @@ function draw() {
     .join("");
   const { queue: q, config, history } = s;
   const card = (title, body, extra = "") =>
-    `<section class="card">${head("", title, extra)}${body}</section>`;
+    `<section class="card">${head(title, extra)}${body}</section>`;
   const queueRows = [];
   function taskRow(status, job) {
     return `<tr><td>#${esc(job.job_id)}</td><td>${esc(status)}</td><td>${esc(job.link)}</td><td>${esc(channelLabel(job.target_chat_id))}</td></tr>`;

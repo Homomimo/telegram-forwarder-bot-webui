@@ -64,11 +64,11 @@ class Session:
 
 
 class AdminPanel:
-    def __init__(self, bot, *, allowed, home, guide, target_id, source_id, source_list, post_link, export_range):
+    def __init__(self, bot, *, allowed, home, guide, source_id, post_link, export_range):
         self.bot, self.allowed = bot, allowed
         self.home, self.guide = home, guide
         self.webui_url: str | None = None
-        self.target_id, self.source_id, self.source_list = target_id, source_id, source_list
+        self.source_id = source_id
         self.post_link, self.export_range = post_link, export_range
         self.sessions: dict[int, Session] = {}  # At most one current panel and lock per administrator.
         self.locks: dict[int, asyncio.Lock] = {}

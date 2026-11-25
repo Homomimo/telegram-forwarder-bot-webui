@@ -1,9 +1,6 @@
 **
 !Dockerfile
 !VERSION
-!requirements.txt
 !*.py
-!tdl_patch/
-!tdl_patch/**
 !static/
 !static/**
