@@ -210,7 +210,7 @@ class ForwardTask:
     error_msg: str = ""
     created_at: float = 0
     grouped_id: Optional[int] = None
-    album_event_ids: Optional[list[int]] = None  # durable snapshot from one multi-member Album event
+    album_event_ids: Optional[list[int]] = None  # Album event or source IDs verified against an admin-confirmed count
     mode: str = "clone"  # clone、export_range、monitor_copy、monitor_edit
     message_ids: Optional[list[int]] = None
     source_chat_id: Optional[int] = None
@@ -416,6 +416,27 @@ class TaskQueue:
             task.waiting_for_album = True
             self._peer_wait[task.job_id] = task
             logger.warning('相册未收齐，等待同组更新：%s（%s）', task.link, exc)
+
+    async def recover_album(self, job_id, expected_count):
+        task = self._peer_wait.get(job_id)
+        if task is None or not task.waiting_for_album:
+            raise ValueError('该任务不在等待相册补齐，请用 /queue 核对任务 ID。')
+        observed = sorted(set(task.message_ids).union(task.album_event_ids or ()))
+        client, source_peer, _ = await self.bot.monitor_route(task)
+        posts = await read_members(client, source_peer, observed, task.grouped_id)
+        ids = [post.id for post in posts]
+        # A real Album event, /tdlstop or another recovery may win while reading Telegram.
+        if self.bot._stopping or self._peer_wait.get(job_id) is not task:
+            raise ValueError('等待任务状态已改变，请用 /queue 查看；本次未重复入队。')
+        if len(ids) != expected_count:
+            raise ValueError(f'源频道回读到 {len(ids)} 项，与确认的 {expected_count} 项不符；本次未入队。')
+        if not set(task.message_ids).issubset(ids) or not set(task.album_event_ids or ()).issubset(ids):
+            raise ValueError('回读结果未包含全部已观察成员，本次未入队。')
+        ready = replace(task, message_ids=ids, album_event_ids=ids, waiting_for_album=False,
+                        link=f'https://t.me/c/{task.source_chat_id}/{ids[0]}')
+        self.journal.save(ready)  # Same job ID; publish to the worker only after the durable write.
+        del self._peer_wait[job_id]
+        self.queue.put_nowait(ready)
 
     def _schedule_retry(self, task, delay):
         task.status = TaskStatus.PENDING
@@ -3192,6 +3213,22 @@ class TelegramBot:
                 return re.fullmatch(r'[1-9][0-9]{0,18}', value) is not None and int(value) < 2**63
 
             queue = self.task_queue
+            if len(parts) > 1 and parts[1].lower() == 'album':
+                if len(parts) != 4 or not valid_job_id(parts[2]) or not re.fullmatch(r'[2-9]|10', parts[3]):
+                    await respond('用法：/queue album <任务ID> <源相册实际项数（2–10）>。请先核对源相册和目标频道，不要猜数。')
+                    return True
+                try:
+                    await asyncio.wait_for(queue.recover_album(int(parts[2]), int(parts[3])), timeout=30)
+                except ValueError as exc:
+                    await respond(str(exc), parse_mode=None)
+                except errors.FloodWaitError as exc:
+                    await respond(f'频道读取被限流，请在 {exc.seconds} 秒后重试。')
+                except (TimeoutError, OSError, errors.RPCError, sqlite3.Error):
+                    await respond('暂时无法核对源相册或保存任务，请稍后用 /queue 核对后重试。')
+                else:
+                    await respond(f'任务 #{parts[2]} 已核对 {parts[3]} 项并重新入队；发送前仍会检查投递记录。')
+                return True
+
             if len(parts) > 1 and parts[1].lower() == 'done':
                 args = parts[2:]
                 if len(args) == 1 and args[0].lower() == 'all':
@@ -3223,7 +3260,7 @@ class TelegramBot:
             before = None
             if len(parts) != 1:
                 if len(parts) != 2 or not valid_job_id(parts[1]):
-                    await respond('用法：/queue · /queue <上一页末尾的任务 ID> · /queue done <任务ID> [任务ID…] · /queue done all')
+                    await respond('用法：/queue · /queue <上一页末尾的任务 ID> · /queue album <任务ID> <源相册实际项数> · /queue done <任务ID> [任务ID…] · /queue done all')
                     return True
                 before = int(parts[1])
             snapshot = queue.snapshot()

@@ -81,6 +81,8 @@ def render_queue_status(snapshot, review_text):
             rows = [_task_row(key, t, i) for i, t in enumerate(snapshot[key], 1)]
             sections.append((key, title, counts[key], rows))
     footer = []
+    if any(task['waiting_for_album'] for task in snapshot['peer']):
+        footer.append('源相册已发完但目标未收到？核对实际项数后，用 /queue album <任务ID> <项数> 重新核对并入队。')
     if counts['early_edits']:
         footer.append(f"✏️ 待映射编辑：{counts['early_edits']} 项（等源帖建立映射，不会自行出队；可用 /tdlstop 清除）")
     if review_text:

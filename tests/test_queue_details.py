@@ -34,6 +34,52 @@ class QueueDetailsTests(MonitorHarness, unittest.IsolatedAsyncioTestCase):
         self.queue.journal.save(task, state)
         return task
 
+    async def park_single_album_update(self):
+        event = self.event(12, album=80)
+        await self.enqueue(event)
+        task = self.take()
+        task.retries = 2
+        await self.queue._process_task(task)
+        self.assertTrue(task.waiting_for_album)
+        return task
+
+    async def test_recover_album_by_verified_count_without_an_album_event(self):
+        task = await self.park_single_album_update()
+        jid = str(task.job_id)
+        client = self.bot.client
+        client.get_messages.return_value = [*self.event(12, 15, album=80).messages,
+                                            *self.event(13, album=81).messages]
+        self.assertIn('不符', await self.command('/queue', 'album', jid, '3'))
+        self.assertEqual(self.queue.journal.restore()[0][1], 'wait_album')
+        client.forward.assert_not_awaited()
+        self.assertIn('重新入队', await self.command('/queue', 'album', jid, '2'))
+        self.assertIn('不在等待', await self.command('/queue', 'album', jid, '2'))
+        row, = self.queue.journal.restore()
+        self.assertEqual((row[0], row[1], row[2]['album_event_ids']), (task.job_id, 'pending', [12, 15]))
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        client.forward.assert_awaited_once()
+        self.assertEqual(client.forward.await_args.args[0].id, [12, 15])
+        self.assertEqual(self.queue.journal.restore(), [])
+
+    async def test_recover_album_with_partial_receipt_never_sends_again(self):
+        task = await self.park_single_album_update()
+        self.bot.client.get_messages.return_value = self.event(12, 15, album=80).messages
+        self.bot.monitor_message_map().remember(SOURCE, TARGET, {15: 99})
+        await self.command('/queue', 'album', str(task.job_id), '2')
+        self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.bot.client.forward.assert_not_awaited()
+
+    async def test_cancel_during_album_recovery_does_not_resurrect_job(self):
+        task = await self.park_single_album_update()
+        async def cancel_during_read(*args, **kwargs):
+            await self.queue.stop_tdl_tasks()
+            return self.event(12, 15, album=80).messages
+        self.bot.client.get_messages.side_effect = cancel_during_read
+        self.assertIn('状态已改变', await self.command('/queue', 'album', str(task.job_id), '2'))
+        self.assertEqual(self.queue.journal.restore(), [])
+        self.assertTrue(self.queue.queue.empty())
+        self.bot.client.forward.assert_not_awaited()
+
     async def test_empty_notice_unchanged(self):
         self.assertEqual(await self.command('/queue'), '📋 转发队列为空，当前没有正在处理或等待中的任务。')
 
