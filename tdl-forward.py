@@ -1056,6 +1056,7 @@ START_MESSAGE_ADMIN = """🤖 消息转发助手 · 管理面板
 
 🛠 任务与维护
 /queue — 查看任务明细；核对后用 /queue done <任务ID> 或 /queue done all 移除待核对记录
+/queue album <任务ID> <实际项数> — 恢复「相册未收齐」任务。先确认目标未收到，再数清源相册的 2–10 项。
 /tdlstop — 停止当前手动转发，清空等待任务和定时重试；已开始的自动同步不强停
 /flog [页码] — 分页查看保留期内全部转发记录
 /flog id <记录号> — 查看消息数、目标帖和诊断
@@ -1099,6 +1100,7 @@ https://t.me/channel_name/42
 /monitor set <ID1,ID2> — 替换整个监听列表
 /monitor clear — 清空监听列表
 /queue — 查看任务明细；/queue done <任务ID> 或 /queue done all 移除待核对记录
+/queue album <任务ID> <实际项数> — 如果源相册已发完、目标未收到，先用 /queue 查看任务 ID，再数清源相册有几项（2–10）。数量核对一致才重新入队。
 /tdlstop — 停止手动任务并清空排队、重试，不强停正在执行的自动同步
 /flog [页码] · /flog id <记录号> · /flog clear — 浏览记录、查看详情、清空本地记录
 /restart · /start — 重启机器人 · 返回管理面板
