@@ -1,0 +1,161 @@
+"""TDL media download plus receipted MTProto publication (not TDL forward stdout)."""
+from pathlib import Path
+
+from telethon import errors, functions, types, utils
+
+
+def media_key(post):
+    media = post.media
+    if getattr(media, 'ttl_seconds', None):
+        raise ValueError('限时媒体不支持转存或替换；未生成永久副本')
+    if isinstance(media, types.MessageMediaPhoto) and isinstance(media.photo, types.Photo):
+        return f'photo:{media.photo.id}:{bool(media.spoiler)}'
+    if isinstance(media, types.MessageMediaDocument) and isinstance(media.document, types.Document):
+        return f'document:{media.document.id}:{bool(media.spoiler)}'
+    if media is None or isinstance(media, types.MessageMediaWebPage):
+        return 'text'
+    raise ValueError('暂不支持重新发布该媒体类型，未降级成文字或拆散相册')
+
+
+def uploaded_media_key(media):
+    # Permanent identity from uploadMedia; access hashes and expiring file references aren't fingerprints.
+    if media is None:
+        return 'text'
+    if isinstance(media, types.InputMediaPhoto):
+        return f'photo:{media.id.id}:{bool(media.spoiler)}'
+    if isinstance(media, types.InputMediaDocument):
+        return f'document:{media.id.id}:{bool(media.spoiler)}'
+    raise ValueError('缺少可核验的目标媒体引用')
+
+
+class AlbumNotReady(ValueError):
+    """The source does not yet expose all observed album members."""
+
+
+async def read_members(client, peer, ids, grouped_id):
+    """Read actual grouped IDs, never infer membership from adjacent numeric IDs."""
+    max_id = 2**31 - 1
+    if (not ids or len(ids) > 10 or not all(type(mid) is int and 1 <= mid <= max_id for mid in ids)
+            or max(ids) - min(ids) > 1000):
+        raise ValueError('源消息范围异常，未发送')
+    if grouped_id is None:
+        posts = await client.get_messages(peer, ids=ids)
+    else:
+        # Telegram albums have <=10 members. Leave room for interleaved channel posts.
+        low, high = max(1, min(ids) - 100), min(max_id, max(ids) + 100)
+        posts = await client.get_messages(peer, ids=list(range(low, high + 1)))
+        posts = [p for p in posts if p and getattr(p, 'grouped_id', None) == grouped_id]
+        if any((p.id == high and high < max_id) or (p.id == low and low > 1) for p in posts):
+            raise ValueError('相册成员触及查询边界，未能安全确认整组，未发送')
+    found = {p.id: p for p in posts if p and not isinstance(p, types.MessageEmpty)}
+    if not set(ids).issubset(found):
+        if grouped_id is not None:
+            raise AlbumNotReady('相册成员暂不可读取，未发送')
+        raise ValueError('源消息已删除或不可读取，未发送')
+    posts = [found[mid] for mid in sorted(found)]
+    if grouped_id is not None and len(posts) < 2:
+        raise AlbumNotReady('相册成员尚未收齐，未发送')
+    if grouped_id is not None and len(posts) > 10:
+        raise ValueError('相册成员不完整或数量异常，未拆散发送')
+    if any(getattr(p, 'grouped_id', None) != grouped_id for p in posts):
+        raise ValueError('源消息分组已变化，未发送')
+    return posts
+
+
+async def source_posts(client, peer, ids, grouped_id):
+    posts = await read_members(client, peer, ids, grouped_id)
+    for post in posts:
+        media_key(post)
+        if media_key(post) == 'text' and not post.raw_text:
+            raise ValueError('源文字为空，未发送')
+    if grouped_id is not None and any(media_key(p) == 'text' for p in posts):
+        raise ValueError('相册含不可上传的成员，未发送')
+    return posts
+
+
+def expected_size(post):
+    media = post.media
+    if isinstance(media, types.MessageMediaDocument):
+        return media.document.size
+    if isinstance(media, types.MessageMediaPhoto):
+        # Match upstream TDL GetPhotoSize: use the last (full-sized) photo variant.
+        size = media.photo.sizes[-1] if media.photo.sizes else None
+        return getattr(size, 'size', 0) or max(getattr(size, 'sizes', []) or [0])
+    return 0
+
+
+async def upload_batch(tdl, client, source_peer, target, source_id, posts, directory):
+    photos = [p for p in posts if isinstance(p.media, types.MessageMediaPhoto)]
+    if photos:
+        channel = await client.get_entity(source_peer)
+        if not isinstance(channel, types.Channel) or channel.id != source_id or channel.min:
+            raise ValueError('无法核实源频道的照片转存权限，未上传')
+        if not channel.creator and (channel.noforwards or any(getattr(p, 'noforwards', True) for p in photos)):
+            raise ValueError('源频道或照片禁止转发，当前监听账号不是源频道所有者，未上传')
+    return {p.id: await _uploaded_media(tdl, client, target, source_id, p, directory) for p in posts}
+
+
+async def _uploaded_media(tdl, client, target, source_id, post, directory):
+    key = media_key(post)
+    if key == 'text':
+        return None
+    # TDL returns a JPEG for a Telegram Photo. Telethon uses the upload basename as InputFile.name.
+    suffix = '.jpg' if isinstance(post.media, types.MessageMediaPhoto) else '.bin'
+    path = Path(directory) / f'{post.id}{suffix}'
+    await tdl.download_media(f'https://t.me/c/{source_id}/{post.id}', str(path))
+    size = expected_size(post)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError(f'源消息 {post.id} 的媒体下载不完整，未发送')
+    if size and path.stat().st_size != size:
+        raise ValueError(f'源消息 {post.id} 的媒体大小不符，未发送')
+    media = post.media
+    file = await client.upload_file(str(path))
+    if key.startswith('photo:'):
+        uploaded = types.InputMediaUploadedPhoto(file, spoiler=media.spoiler)
+    else:
+        doc = media.document
+        uploaded = types.InputMediaUploadedDocument(file, doc.mime_type, doc.attributes,
+                                                    spoiler=media.spoiler)
+    try:
+        result = await client(functions.messages.UploadMediaRequest(target, uploaded))
+    except errors.PhotoExtInvalidError as exc:
+        raise ValueError(
+            f'源消息 {source_id}/{post.id}：Telegram 拒绝了照片文件扩展名（PHOTO_EXT_INVALID）。'
+            '本次未发布新帖，也未修改已有目标帖。'
+        ) from exc
+    result = utils.get_input_media(result)
+    if not isinstance(result, (types.InputMediaPhoto, types.InputMediaDocument)):
+        raise ValueError(f'源消息 {post.id} 的媒体上传未返回有效引用')
+    result.spoiler = bool(media.spoiler)
+    return result
+
+
+def publish_request(peer, posts, media, reserved):
+    if len(posts) > 1:
+        return functions.messages.SendMultiMediaRequest(peer, [
+            types.InputSingleMedia(media[p.id], message=p.raw_text or '', random_id=reserved[p.id], entities=p.entities or [])
+            for p in posts])
+    post = posts[0]
+    kwargs = dict(peer=peer, message=post.raw_text or '', random_id=reserved[post.id], entities=post.entities or [])
+    if media[post.id] is None:
+        return functions.messages.SendMessageRequest(**kwargs,
+            no_webpage=not isinstance(post.media, types.MessageMediaWebPage))
+    return functions.messages.SendMediaRequest(**kwargs, media=media[post.id])
+
+
+def receipt_pairs(sent, reserved, *, allow_short=True):
+    by_random = {}
+    for update in getattr(sent, 'updates', ()):
+        if isinstance(update, types.UpdateMessageID) and update.random_id in reserved.values():
+            if update.random_id in by_random and by_random[update.random_id] != update.id:
+                raise ValueError('目标回执包含冲突的 random_id')
+            if type(update.id) is not int or not 0 < update.id < 2**31:
+                raise ValueError('目标回执消息 ID 无效')
+            by_random[update.random_id] = update.id
+    if allow_short and isinstance(sent, types.UpdateShortSentMessage) and len(reserved) == 1:
+        if type(sent.id) is int and 0 < sent.id < 2**31:
+            by_random[next(iter(reserved.values()))] = sent.id
+    pairs = {mid: by_random[rid] for mid, rid in reserved.items() if rid in by_random}
+    if len(set(pairs.values())) != len(pairs):
+        raise ValueError('目标回执将多个源成员关联到同一消息')
+    return pairs

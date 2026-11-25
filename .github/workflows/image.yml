@@ -1,0 +1,89 @@
+name: Test and build container image
+on:
+  pull_request:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.image.outputs.version }}
+      tags: ${{ steps.image.outputs.tags }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate source version and derive image tags
+        id: image
+        run: python3 .github/scripts/image_metadata.py
+      - name: Check Web JavaScript
+        run: node --check static/app.js
+      - name: Build image and verify offline Demo
+        run: bash .github/scripts/verify-image.sh
+
+  publish:
+    if: github.event_name == 'push' && !github.event.deleted && startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    concurrency:
+      group: ghcr-stable-release
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Prevent an older release from replacing latest
+        run: |
+          newest=''
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              newest=$tag
+              break
+            fi
+          done < <(git tag --list 'v*' --sort=-version:refname)
+          if [[ "$GITHUB_REF_NAME" != "$newest" ]]; then
+            echo "Not publishing $GITHUB_REF_NAME: a newer release tag ($newest) exists." >&2
+            exit 1
+          fi
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish both architectures
+        id: publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ needs.verify.outputs.tags }}
+          build-args: APP_VERSION=${{ needs.verify.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=Telegram channel relay with Bot and Web controls
+      - name: Show published image references
+        env:
+          TAGS: ${{ needs.verify.outputs.tags }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          printf 'Published tags: `%s`\n\nManifest: `%s`\n' "$TAGS" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!VERSION
+!requirements.txt
+!*.py
+!tdl_patch/
+!tdl_patch/**
+!static/
+!static/**
+!tools/
+!tools/verify_demo.py

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="252" viewBox="0 0 560 252" fill="none">
+<defs>
+ <linearGradient id="prism" x1=".05" y1="0" x2=".9" y2="1"><stop stop-color="#a2f6f0" stop-opacity=".85"/><stop offset=".32" stop-color="#d3e5fb" stop-opacity=".82"/><stop offset=".5" stop-color="#a39fe6" stop-opacity=".65"/><stop offset=".75" stop-color="#b5a1ff" stop-opacity=".67"/><stop offset="1" stop-color="#f5b8e9" stop-opacity=".9"/></linearGradient>
+ <linearGradient id="edge"><stop stop-color="#a8f3fa"/><stop offset=".43" stop-color="#a7b2ff" stop-opacity=".45"/><stop offset="1" stop-color="#f0ceff"/></linearGradient>
+ <linearGradient id="base"><stop stop-color="#8498de" stop-opacity=".22"/><stop offset=".5" stop-color="#675ca9" stop-opacity=".7"/><stop offset="1" stop-color="#a4a7df" stop-opacity=".35"/></linearGradient>
+ <linearGradient id="rail"><stop stop-color="#8879dd" stop-opacity=".1"/><stop offset=".47" stop-color="#b3b1f9"/><stop offset=".78" stop-color="#acfbf0"/><stop offset="1" stop-color="#9adacf" stop-opacity=".2"/></linearGradient>
+ <pattern id="grid" width="34" height="18" patternUnits="userSpaceOnUse"><path d="m0 0 34 18 M34 0 0 18" stroke="#9c9bdc" stroke-width=".55" opacity=".27"/></pattern>
+ <pattern id="dots" width="6" height="6" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r=".75" fill="#f9f8ff" opacity=".45"/></pattern>
+ <filter id="blur" x="-.5" y="-.5" width="2" height="2"><feGaussianBlur stdDeviation="8"/></filter>
+ <path id="tile" d="M171 93 Q164 89 172 84 L269 36 Q279 31 290 36 L385 82 Q395 87 385 92 L290 142 Q280 147 268 142Z"/>
+</defs>
+<path d="M0 135 271 1 559 142 315 251Z" fill="url(#grid)"/>
+<g stroke="url(#rail)" stroke-linecap="round"><path d="m28 165 61-31q6-3 13 1l27 14q5 2 11-1l65-33m141 19 40 20q7 4 15 0l62-31q9-5 17 0l44 20" stroke-width="2"/><path d="m51 184 32-16m71 4 36-18m161-63 36-18q7-4 14 0l24 12 32-17m-98 91 42 21 40-20" stroke-dasharray="3 5"/></g>
+<g fill="#bdf2ef"><circle cx="89" cy="134" r="3"/><circle cx="463" cy="123" r="3"/><circle cx="524" cy="143" r="2.5"/></g>
+<ellipse cx="279" cy="183" rx="95" ry="27" fill="#bab1ff" opacity=".32" filter="url(#blur)"/>
+<use href="#tile" transform="translate(0 64)" fill="url(#base)" stroke="#a99fef" opacity=".65"/><use href="#tile" transform="translate(0 56)" fill="url(#base)" stroke="url(#edge)"/>
+<use href="#tile" transform="translate(0 42)" fill="url(#base)" stroke="url(#edge)"/><use href="#tile" transform="translate(0 37)" fill="url(#base)" stroke="#c9d0f5" stroke-opacity=".55"/>
+<use href="#tile" transform="translate(0 20)" fill="url(#prism)" fill-opacity=".5" stroke="url(#edge)"/><use href="#tile" transform="translate(0 15)" fill="url(#base)" stroke="url(#edge)"/>
+<use href="#tile" transform="translate(0 5)" fill="url(#prism)" stroke="url(#edge)"/><use href="#tile" fill="url(#prism)" stroke="#eeedff" stroke-width="1.7"/><use href="#tile" fill="url(#dots)"/>
+<path d="m242 87 75-18-31 38-11-15-33-5Z" fill="#fffcff" stroke="#645398" stroke-width="1.2"/><path d="m275 92 35-20-28 24" fill="#a5a4d7"/>
+<g font-family="Consolas,monospace" font-size="8" letter-spacing="1.6" fill="#d6d1fc"><text x="44" y="121">01 / SOURCE</text><text x="420" y="106">02 / TARGET</text><text x="221" y="228">FORWARDER NODE</text></g>
+</svg>

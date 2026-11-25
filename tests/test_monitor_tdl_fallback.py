@@ -1,0 +1,649 @@
+"""Offline checks for TDL-assisted publication, exact receipts and album integrity."""
+import asyncio
+import sqlite3
+import tempfile
+import unittest
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock, patch
+
+import bot_fixture as fixtures
+
+app, SOURCE, TARGET = fixtures.app, fixtures.SOURCE, fixtures.TARGET
+T, F = app.types, app.functions.messages
+
+
+def photo(mid, group=None, *, media_id=None, text='caption'):
+    raw = T.Photo(media_id or mid, 10, b'ref', datetime.now(timezone.utc), [T.PhotoSize('x', 20, 20, 8)], 2)
+    return NS(id=mid, grouped_id=group, media=T.MessageMediaPhoto(photo=raw), raw_text=text,
+              entities=[T.MessageEntityBold(0, 3)])
+
+
+def text(mid):
+    return NS(id=mid, grouped_id=None, media=None, raw_text='text', entities=[])
+
+
+class RestrictedCloneTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase):
+    def restrict(self, *posts):
+        self.posts = {p.id: p for p in posts}
+        self.bot.client.get_messages.side_effect = self.read
+        self.bot.client.get_entity = AsyncMock(return_value=T.Channel(SOURCE, 'test', T.ChatPhotoEmpty(), None,
+                                                                     creator=True, noforwards=True))
+        self.bot.client.forward.side_effect = self.rpc
+        self.bot.client.upload_file = AsyncMock(return_value=T.InputFile(1, 1, 'file', ''))
+        self.bot.tdl.forward_clone = AsyncMock()
+        self.bot.tdl.download_media = AsyncMock(side_effect=self.download)
+        patch.object(app, 'MONITOR_TDL_FALLBACK', True).start()
+        self.publish_error = None
+        self.receipt = None
+
+    async def read(self, peer, *, ids):
+        if isinstance(ids, int):
+            return self.posts.get(ids) if ids in self.posts else photo(ids)
+        return [self.posts[mid] for mid in ids if mid in self.posts]
+
+    async def download(self, link, output_file):
+        Path(output_file).write_bytes(b'12345678')
+
+    async def rpc(self, request):
+        if isinstance(request, F.ForwardMessagesRequest):
+            raise app.errors.ChatForwardsRestrictedError(None)
+        if isinstance(request, F.UploadMediaRequest):
+            if isinstance(request.media, T.InputMediaUploadedPhoto):
+                return photo(9000).media
+            return T.MessageMediaDocument(document=T.Document(9000, 1, b'ref', datetime.now(timezone.utc), 'video/mp4', 8, 2, []))
+        if self.publish_error:
+            raise self.publish_error
+        if self.receipt is not None:
+            return self.receipt
+        ids = sorted(self.posts)
+        nonces = ([m.random_id for m in request.multi_media] if isinstance(request, F.SendMultiMediaRequest)
+                  else [request.random_id])
+        return NS(updates=list(reversed([T.UpdateMessageID(500+mid*3, nonce) for mid, nonce in zip(ids, nonces)])))
+
+    def publications(self):
+        return [c.args[0] for c in self.bot.client.forward.await_args_list
+                if isinstance(c.args[0], (F.SendMultiMediaRequest, F.SendMediaRequest, F.SendMessageRequest))]
+
+    def state(self, mid):
+        return self.bot.monitor_message_map().copy_state(SOURCE, mid, TARGET)
+
+    async def test_album_one_request_exact_members_and_random_id_mapping(self):
+        self.restrict(photo(3, 99), photo(7, 99), photo(12, 99))
+        self.bot.report_monitor_status = AsyncMock()
+        original_read = self.read
+        async def read(peer, *, ids):
+            return [text(8), *(await original_read(peer, ids=ids))] if len(ids) > 10 else await original_read(peer, ids=ids)
+        self.bot.client.get_messages.side_effect = read
+        await self.enqueue(self.event(3, 7, 12, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.bot.forward_log.add.assert_called_once_with(f'https://t.me/c/{SOURCE}/3', TARGET, True,
+                                                         target_message_id=509, delivery=app.Delivery(
+                                                             '自动复制', 'TDL 下载、Bot 发布', {3: 509, 7: 521, 12: 536}, True))
+        req, = self.publications()
+        switch, success = (call.args[0] for call in self.bot.report_monitor_status.await_args_list)
+        self.assertIn('源帖不支持直接复制，将下载媒体后上传到目标频道。', switch)
+        self.assertEqual(success.splitlines(), ['✅ 自动复制成功 · 已发布 3 条消息',
+                         f'来源：{SOURCE}', f'目标：{TARGET}', '源帖：', f'https://t.me/c/{SOURCE}/3', '目标帖：',
+                         *(f'https://t.me/c/{TARGET}/{mid}?single' for mid in (509, 521, 536))])
+        self.assertEqual([m.message for m in req.multi_media], ['caption'] * 3)
+        self.assertTrue(all(m.entities == [T.MessageEntityBold(0, 3)] for m in req.multi_media))
+        self.assertEqual([self.bot.monitor_message_map().get(SOURCE, i, TARGET) for i in (3,7,12)], [509,521,536])
+        self.assertEqual([int(c.args[0].rsplit('/', 1)[1]) for c in self.bot.tdl.download_media.await_args_list], [3,7,12])
+        self.bot.tdl.forward_clone.assert_not_awaited()
+
+    def advance_retry(self):
+        q = self.bot.task_queue
+        timer, task = q._retry_timers.popitem()
+        timer.cancel()
+        q.queue.put_nowait(task)
+
+    async def test_flood_on_first_fallback_read_honors_deadline_across_restart(self):
+        self.restrict(photo(5))
+        self.bot.report_monitor_status = AsyncMock()
+        self.bot.client.get_messages.side_effect = app.errors.FloodWaitError(F.GetMessagesRequest([5]), capture=17)
+        await self.enqueue(self.event(5))
+        now = app.time.time()
+        with patch.object(app.time, 'time', return_value=now):
+            task = await self.process()
+        self.assertEqual((task.status, task.send_started, task.ready_at), (app.TaskStatus.PENDING, False, now + 17))
+        row, = self.bot.task_queue.journal.restore()
+        self.assertEqual((row[1], row[2]['retries'], row[2]['ready_at']), ('pending', 1, now + 17))
+        self.assertEqual(self.state(5), app.TaskStatus.PENDING)
+        self.assertFalse(self.publications()); self.bot.forward_log.add.assert_not_called()
+        self.bot.report_monitor_status.assert_awaited_once()
+        self.assertIn('读取源帖时遇到限流，17 秒后重试。尚未发布，无需重新提交。',
+                      self.bot.report_monitor_status.await_args.args[0])
+        await self.bot.stop(); self.bot = self.make_bot(); self.restrict(photo(5))
+        with patch.object(app.time, 'time', return_value=now + 5):
+            self.bot.task_queue._restore()
+        self.assertTrue(self.bot.task_queue.queue.empty())
+        self.advance_retry()
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.assertEqual(len(self.publications()), 1)
+        self.assertEqual(self.bot.monitor_message_map().get(SOURCE, 5, TARGET), 515)
+
+    async def test_flood_rereading_album_after_upload_does_not_publish_partial_group(self):
+        self.bot.report_monitor_status = AsyncMock()
+        self.restrict(photo(3, 99), photo(7, 99))
+        async def read(peer, *, ids):
+            if self.bot.tdl.download_media.await_count:
+                raise app.errors.FloodWaitError(F.GetMessagesRequest(ids), capture=17)
+            return await self.read(peer, ids=ids)
+        self.bot.client.get_messages.side_effect = read
+        await self.enqueue(self.event(3, 7, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.PENDING)
+        self.assertEqual([self.state(i) for i in (3, 7)], [app.TaskStatus.PENDING]*2)
+        self.assertFalse(self.publications()); self.bot.forward_log.add.assert_not_called()
+        self.assertIn('发布前复核源帖时遇到限流，17 秒后重试。', self.bot.report_monitor_status.await_args.args[0])
+        self.bot.client.get_messages.side_effect = self.read
+        self.advance_retry(); self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        req, = self.publications()
+        self.assertIsInstance(req, F.SendMultiMediaRequest)
+        self.assertEqual([self.bot.monitor_message_map().get(SOURCE, i, TARGET) for i in (3, 7)], [509, 521])
+
+    async def test_media_upload_wait_reports_preparation_not_source_read(self):
+        self.restrict(photo(5))
+        self.bot.report_monitor_status = AsyncMock()
+        async def rpc(req):
+            if isinstance(req, F.UploadMediaRequest):
+                raise app.errors.FloodWaitError(req, capture=23)
+            return await self.rpc(req)
+        self.bot.client.forward.side_effect = rpc
+        await self.enqueue(self.event(5))
+        self.assertEqual((await self.process()).status, app.TaskStatus.PENDING)
+        self.assertIn('准备媒体时遇到限流，23 秒后重试。尚未发布，无需重新提交。',
+                      self.bot.report_monitor_status.await_args.args[0])
+        self.assertFalse(self.publications()); self.bot.forward_log.add.assert_not_called()
+
+    async def test_fallback_preparation_flood_budget_is_bounded(self):
+        self.restrict(photo(5))
+        self.bot.client.get_messages.side_effect = app.errors.FloodWaitError(None, capture=17)
+        await self.enqueue(self.event(5))
+        for retry in (1, 2):
+            task = await self.process()
+            self.assertEqual((task.status, task.retries), (app.TaskStatus.PENDING, retry))
+            self.advance_retry()
+        with self.assertLogs(app.logger, 'ERROR'):
+            task = await self.process()
+        self.assertEqual(task.status, app.TaskStatus.FAILED)
+        self.assertIn('重试次数已用完，未发布目标帖', task.error_msg)
+        self.assertFalse(self.publications()); self.assertFalse(self.bot.task_queue._retry_timers)
+        self.assertEqual(self.bot.task_queue.journal.restore(), [])
+        self.bot.forward_log.add.assert_called_once()
+        self.assertEqual(self.bot.forward_log.add.call_args.kwargs['delivery'].route, '重新发布（尚未确定内容类型）')
+
+    async def test_flood_from_publication_is_not_retried_as_preparation(self):
+        self.restrict(photo(5))
+        self.publish_error = app.errors.FloodWaitError(None, capture=17)
+        await self.enqueue(self.event(5))
+        with self.assertLogs(app.logger, 'ERROR'):
+            task = await self.process()
+        self.assertEqual(task.status, app.TaskStatus.UNCONFIRMED)
+        self.assertFalse(self.bot.task_queue._retry_timers)
+        self.assertEqual(self.bot.task_queue.journal.reviews()[0], 1)
+        self.assertEqual(len(self.publications()), 1)
+
+    async def test_fallback_waits_when_source_has_more_than_album_event(self):
+        self.restrict(photo(3, 99), photo(7, 99), photo(12, 99))
+        await self.enqueue(self.event(3, 7, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.PENDING)
+        self.bot.client.forward.assert_not_awaited()
+        await self.enqueue(self.event(3, 7, 12, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.assertEqual(len(self.publications()[0].multi_media), 3)
+
+    async def test_previously_delivered_member_blocks_split_or_duplicate(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        self.bot.monitor_message_map().remember(SOURCE, TARGET, {3: 93})
+        await self.enqueue(self.event(3, 7, album=99))
+        with self.assertLogs(app.logger, 'WARNING'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.bot.client.forward.assert_not_awaited()
+        self.assertFalse(self.publications())
+        self.assertEqual(self.state(7), app.TaskStatus.PENDING)
+        self.assertEqual(self.bot.task_queue.journal.reviews()[1][0]['message_ids'], [7])
+
+    async def test_caption_edit_does_not_reattach_protected_media(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5)); await self.process()
+        self.posts[5].raw_text = 'new caption'
+        await self.enqueue(self.event(5), edited=True)
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        call = self.bot.client.edit_message.await_args
+        self.assertEqual((call.args[1], call.kwargs['text'], call.kwargs['file']), (515, 'new caption', None))
+        self.bot.tdl.download_media.assert_awaited_once()
+
+    async def test_media_replacement_edits_original_target(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5)); await self.process()
+        self.posts[5] = photo(5, media_id=55)
+        await self.enqueue(self.event(5), edited=True)
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.assertEqual(self.bot.client.edit_message.await_args.args[1], 515)
+        self.assertIsInstance(self.bot.client.edit_message.await_args.kwargs['file'], T.InputMediaPhoto)
+        self.assertEqual(self.bot.tdl.download_media.await_count, 2)
+        self.assertEqual(len(self.publications()), 1)
+
+    async def recover_lost_media_edit(self, *, revert_source):
+        self.restrict(photo(5, media_id=101))
+        async def upload_or_publish(req):
+            if isinstance(req, F.UploadMediaRequest):
+                # A freshly uploaded Telegram object is NOT the source attachment ID.
+                return photo(5, media_id=self.posts[5].media.photo.id + 1000).media
+            return await self.rpc(req)
+        self.bot.client.forward.side_effect = upload_or_publish
+        await self.enqueue(self.event(5)); await self.process()
+        self.assertEqual(self.bot.monitor_message_map().cloned_media_keys(SOURCE, 5, TARGET),
+                         ('photo:101:False', 'photo:1101:False'))
+        self.posts[515] = photo(515, media_id=1101)
+        async def apply_but_lose_reply(peer, mid, *, file, **kwargs):
+            self.posts[mid] = photo(mid, media_id=file.id.id)
+            raise ConnectionError('lost edit acknowledgement')
+        self.bot.client.edit_message.side_effect = apply_but_lose_reply
+        self.posts[5] = photo(5, media_id=202)
+        await self.enqueue(self.event(5), edited=True)
+        task = await self.process()
+        self.assertEqual(task.status, app.TaskStatus.PENDING)
+        self.assertEqual(self.posts[515].media.photo.id, 1202)
+        _, _, saved = self.bot.task_queue.journal.restore()[0]
+        self.assertEqual(saved['edit_media_intent'], ['photo:202:False', 'photo:1202:False'])
+        await self.bot.stop()
+        self.bot = self.make_bot()
+        self.restrict(photo(5, media_id=101 if revert_source else 202), photo(515, media_id=1202))
+        self.bot.client.forward.side_effect = upload_or_publish
+        with patch.object(app.time, 'time', return_value=task.ready_at + 1):
+            self.bot.task_queue._restore()
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.assertEqual(self.bot.task_queue.journal.reviews()[0], 0)
+        self.assertEqual(self.publications(), [])
+
+    async def test_reverted_source_media_with_same_caption_repairs_mapped_target(self):
+        await self.recover_lost_media_edit(revert_source=True)
+        edit = self.bot.client.edit_message.await_args
+        self.assertEqual((edit.args[1], edit.kwargs['file'].id.id), (515, 1101))
+        self.assertEqual(self.bot.monitor_message_map().cloned_media_keys(SOURCE, 5, TARGET),
+                         ('photo:101:False', 'photo:1101:False'))
+
+    async def test_lost_edit_verified_from_target_fingerprint_without_reupload(self):
+        await self.recover_lost_media_edit(revert_source=False)
+        self.bot.client.edit_message.assert_not_awaited()
+        self.bot.tdl.download_media.assert_not_awaited()
+        self.assertEqual(self.bot.monitor_message_map().cloned_media_keys(SOURCE, 5, TARGET),
+                         ('photo:202:False', 'photo:1202:False'))
+
+    async def test_legacy_cloned_media_without_target_key_stays_in_review(self):
+        self.restrict(photo(5), photo(515, media_id=111))
+        self.bot.monitor_message_map().remember(SOURCE, TARGET, {5: 515}, 'bot', {5: 'photo:5:False'})
+        await self.enqueue(self.event(5), edited=True)
+        q = self.bot.task_queue
+        task = q.queue.get_nowait(); q.queue.task_done(); q.begin_send(task)
+        q._loaded = False
+        q._restore()  # Older interrupted job: no journaled upload reference either.
+        with self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.assertEqual(q.journal.reviews()[0], 1)
+        self.bot.client.edit_message.assert_not_awaited()
+        self.bot.client.forward.assert_not_awaited()
+
+    async def test_text_only_uses_send_message(self):
+        self.bot.report_monitor_status = AsyncMock()
+        for mid, preview in [(5, None), (6, T.MessageMediaWebPage(T.WebPageEmpty(1)))]:
+            with self.subTest(mid=mid):
+                post = text(mid); post.media = preview
+                self.restrict(post)
+                self.bot.report_monitor_status.reset_mock()
+                await self.enqueue(self.event(mid))
+                self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+                req = self.publications()[-1]
+                self.assertIsInstance(req, F.SendMessageRequest)
+                self.assertEqual(req.no_webpage, preview is None)
+                self.bot.tdl.download_media.assert_not_awaited()
+                self.assertEqual(self.bot.forward_log.add.call_args.kwargs['delivery'].route, 'Bot 发布文字')
+                switch, success = (c.args[0] for c in self.bot.report_monitor_status.await_args_list)
+                self.assertIn('将重新发布文字到目标频道', switch)
+                self.assertNotIn('下载', switch + success)
+                self.assertIn('已发布 1 条消息', success)
+
+    async def test_video_attributes_and_spoiler_preserved(self):
+        p = photo(5)
+        attrs = [T.DocumentAttributeVideo(7, 640, 360, supports_streaming=True), T.DocumentAttributeFilename('v.mp4')]
+        p.media = T.MessageMediaDocument(document=T.Document(5, 1, b'ref', datetime.now(timezone.utc), 'video/mp4', 8, 2, attrs), spoiler=True)
+        self.restrict(p)
+        await self.enqueue(self.event(5)); await self.process()
+        upload, = [c.args[0] for c in self.bot.client.forward.await_args_list if isinstance(c.args[0], F.UploadMediaRequest)]
+        self.assertEqual(upload.media.attributes, attrs)
+        self.assertEqual(upload.media.mime_type, 'video/mp4')
+        self.assertTrue(self.publications()[0].media.spoiler)
+
+    async def test_download_failure_does_not_publish_partial_album(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        self.bot.tdl.download_media.side_effect = ValueError('failed')
+        await self.enqueue(self.event(3, 7, album=99))
+        with self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.FAILED)
+        self.assertFalse(self.publications())
+        self.assertEqual([self.state(i) for i in (3,7)], [app.TaskStatus.PENDING]*2)
+
+    async def test_invalid_photo_extension_reports_member_before_album_publication(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        uploads = []
+
+        async def reject_second(req):
+            if isinstance(req, F.UploadMediaRequest):
+                uploads.append(req)
+                if len(uploads) == 2:
+                    raise app.errors.PhotoExtInvalidError(req)
+            return await self.rpc(req)
+
+        self.bot.client.forward.side_effect = reject_second
+        await self.enqueue(self.event(3, 7, album=99))
+        with self.assertLogs(app.logger, 'ERROR'):
+            task = await self.process()
+        self.assertEqual(task.status, app.TaskStatus.FAILED)
+        self.assertIn(f'{SOURCE}/7', task.error_msg)
+        self.assertIn('PHOTO_EXT_INVALID', task.error_msg)
+        self.assertFalse(self.publications())
+        self.assertEqual([self.state(i) for i in (3, 7)], [app.TaskStatus.PENDING]*2)
+
+    async def test_photos_use_jpeg_upload_names_for_album_and_replacement(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        self.bot.client.upload_file.side_effect = lambda path: T.InputFile(1, 1, Path(path).name, '')
+        await self.enqueue(self.event(3, 7, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.bot.client.get_entity.assert_awaited_once()
+        self.posts[7] = photo(7, 99, media_id=70)
+        await self.enqueue(self.event(7), edited=True)
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.assertEqual([c.args[0].media.file.name for c in self.bot.client.forward.await_args_list
+                          if isinstance(c.args[0], F.UploadMediaRequest)], ['3.jpg', '7.jpg', '7.jpg'])
+        self.assertEqual(len(self.publications()), 1)
+
+    async def test_protected_photos_not_uploaded_by_non_owner(self):
+        self.restrict(photo(5))
+        self.bot.client.get_entity.return_value.creator = False
+        await self.enqueue(self.event(5))
+        with self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.FAILED)
+        self.bot.tdl.download_media.assert_not_awaited()
+        self.assertFalse(self.publications())
+
+    async def test_invalid_replacement_leaves_existing_post_and_mapping_intact(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5)); await self.process()
+        mapping = self.bot.monitor_message_map()
+        old_key = mapping.cloned_media_keys(SOURCE, 5, TARGET)[0]
+        self.posts[5] = photo(5, media_id=55)
+        self.bot.client.forward.side_effect = app.errors.PhotoExtInvalidError(None)
+        await self.enqueue(self.event(5), edited=True)
+        with self.assertLogs(app.logger, 'ERROR'):
+            task = await self.process()
+        self.assertEqual(task.status, app.TaskStatus.FAILED)
+        self.assertIn('未修改已有目标帖', task.error_msg)
+        self.bot.client.edit_message.assert_not_awaited()
+        self.assertEqual(mapping.get(SOURCE, 5, TARGET), 515)
+        self.assertEqual(mapping.cloned_media_keys(SOURCE, 5, TARGET)[0], old_key)
+
+    async def test_missing_member_is_not_dropped(self):
+        self.restrict(photo(3, 99))
+        await self.enqueue(self.event(3, 7, album=99))
+        task = await self.process()
+        self.assertEqual((task.status, task.message_ids), (app.TaskStatus.PENDING, [3, 7]))
+        self.bot.client.forward.assert_not_awaited()
+        self.assertFalse(self.publications())
+
+    async def test_wrong_size_is_not_published(self):
+        self.restrict(photo(5))
+        async def small(link, path): Path(path).write_bytes(b'1')
+        self.bot.tdl.download_media.side_effect = small
+        await self.enqueue(self.event(5))
+        with self.assertLogs(app.logger, 'ERROR'): await self.process()
+        self.assertFalse(self.publications())
+
+    async def test_partial_receipt_maps_only_confirmed_no_resend(self):
+        self.bot.report_monitor_status = AsyncMock()
+        self.restrict(photo(3, 99), photo(7, 99))
+        async def rpc(req):
+            if isinstance(req, F.SendMultiMediaRequest):
+                return NS(updates=[T.UpdateMessageID(99, req.multi_media[0].random_id)])
+            return await self.rpc(req)
+        self.bot.client.forward.side_effect = rpc
+        await self.enqueue(self.event(3, 7, album=99))
+        with self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        notice = self.bot.report_monitor_status.await_args.args[0]
+        self.assertIn('TDL 下载、Bot 发布：部分消息已确认，其余待核对。不会自动重发。\n待核对的源消息 ID：[7]', notice)
+        self.assertEqual(notice.split('已确认的成员：\n')[1], f'源消息 3：\nhttps://t.me/c/{TARGET}/99?single')
+        self.assertEqual([self.state(i) for i in (3,7)], [app.TaskStatus.COMPLETED, app.TaskStatus.UNCONFIRMED])
+        await self.enqueue(self.event(3, 7, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.assertEqual(len(self.publications()), 1)
+
+    async def test_lost_receipt_no_resend_across_restart(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        self.publish_error = ConnectionError('lost')
+        await self.enqueue(self.event(3, 7, album=99))
+        with self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        await self.bot.stop(); self.bot = self.make_bot()
+        await self.enqueue(self.event(3, 7, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.bot.client.forward.assert_not_awaited()
+
+    async def test_database_failure_after_send_no_resend(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5))
+        with patch.object(self.bot.monitor_message_map(), 'remember', side_effect=sqlite3.OperationalError('full')), self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        await self.enqueue(self.event(5))
+        self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.assertEqual(len(self.publications()), 1)
+
+    async def test_no_publish_without_durable_batch_intent(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5))
+        with patch.object(self.bot.monitor_message_map(), 'start_tdl_upload', side_effect=sqlite3.OperationalError('full')), self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.assertFalse(self.publications())
+        self.assertEqual(self.state(5), app.TaskStatus.UNCONFIRMED)
+
+    async def test_latest_caption_after_download_and_no_obsolete_media(self):
+        self.restrict(photo(5))
+        async def download(link, path):
+            await self.download(link, path)
+            self.posts[5].raw_text = 'latest caption'
+        self.bot.tdl.download_media.side_effect = download
+        await self.enqueue(self.event(5)); await self.process()
+        self.assertEqual(self.publications()[0].message, 'latest caption')
+
+    async def test_source_media_changed_during_download_aborts_publication(self):
+        self.restrict(photo(5))
+        async def download(link, path):
+            await self.download(link, path)
+            self.posts[5] = photo(5, media_id=55)
+        self.bot.tdl.download_media.side_effect = download
+        await self.enqueue(self.event(5))
+        with self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.FAILED)
+        self.assertFalse(self.publications())
+        self.assertEqual(self.state(5), app.TaskStatus.PENDING)
+
+    async def test_album_members_changed_during_download_are_not_silently_omitted(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        async def download(link, path):
+            await self.download(link, path)
+            self.posts[12] = photo(12, 99)
+        self.bot.tdl.download_media.side_effect = download
+        await self.enqueue(self.event(3, 7, album=99))
+        self.assertEqual((await self.process()).status, app.TaskStatus.PENDING)
+        self.assertFalse(self.publications())
+        self.assertEqual(self.state(3), app.TaskStatus.PENDING)
+
+    async def test_resync_command_uses_clone_mapping_and_returns_target_link(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5)); await self.process()
+        event = NS(sender_id=61, chat_id=61, client=self.bot.client,
+                   message=NS(text=f'/resync https://t.me/c/{SOURCE}/5'), respond=AsyncMock())
+        with patch.object(app, 'ADMIN_IDS', [61]):
+            self.assertTrue(await self.bot.handle_admin_command(event))
+        self.assertIn(f'https://t.me/c/{TARGET}/515', event.respond.await_args.args[0])
+        await self.process()
+        self.assertEqual(self.bot.client.edit_message.await_args.args[1], 515)
+
+    async def test_early_edit_is_reconciled_after_clone_mapping(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5), edited=True); await self.process()
+        await self.enqueue(self.event(5)); await self.process()
+        self.assertFalse(self.bot.task_queue.queue.empty())
+        await self.process()
+        self.bot.client.edit_message.assert_awaited_once()
+
+    async def test_mapping_and_clone_media_state_survive_restart(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5)); await self.process()
+        await self.bot.stop(); self.bot = self.make_bot()
+        self.bot.client.get_messages.side_effect = self.read
+        await self.enqueue(self.event(5), edited=True); await self.process()
+        self.assertEqual(self.bot.client.edit_message.await_args.args[1], 515)
+        self.assertIsNone(self.bot.client.edit_message.await_args.kwargs['file'])
+        self.assertEqual(self.bot.monitor_message_map().sender_role(SOURCE, 5, TARGET), 'bot')
+
+    async def test_user_sender_is_used_for_later_bot_observed_edit(self):
+        self.restrict(photo(5))
+        user = self.bot.user_client = fixtures.FakeClient()
+        user.get_messages.side_effect = self.read
+        user.get_entity = self.bot.client.get_entity
+        user.forward.side_effect = self.rpc
+        user.upload_file = AsyncMock(return_value=T.InputFile(1, 1, 'file', ''))
+        self.bot.user_monitor_running = True
+        ev = self.event(5); ev.client = user
+        await self.enqueue(ev); await self.process()
+        self.assertEqual(self.bot.monitor_message_map().sender_role(SOURCE, 5, TARGET), 'user')
+        self.assertEqual(self.bot.forward_log.add.call_args.kwargs['delivery'].route, 'TDL 下载、用户账号发布')
+        await self.enqueue(self.event(5), edited=True); await self.process()
+        user.edit_message.assert_awaited_once()
+        self.bot.client.edit_message.assert_not_awaited()
+
+    async def test_album_boundary_and_unknown_member_block_publication(self):
+        self.restrict(photo(150, 99), photo(160, 99), photo(260, 99))
+        await self.enqueue(self.event(150, 160, album=99))
+        with self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.FAILED)
+        self.assertFalse(self.publications())
+
+    async def test_old_schema_migrates_and_pending_intent_is_not_republished(self):
+        with closing(sqlite3.connect(app.MONITOR_MAP_FILE)) as db, db:
+            db.execute('CREATE TABLE monitor_copy_intents(source_chat_id INTEGER, source_message_id INTEGER, '
+                       'target_chat_id INTEGER, random_id INTEGER UNIQUE, '
+                       'PRIMARY KEY(source_chat_id,source_message_id,target_chat_id))')
+            db.execute('INSERT INTO monitor_copy_intents VALUES(?,?,?,?)', (SOURCE, 5, TARGET, 42))
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5))
+        self.assertEqual((await self.process()).status, app.TaskStatus.UNCONFIRMED)
+        self.bot.client.forward.assert_not_awaited()
+
+    async def test_batch_intent_change_rolls_back_atomically(self):
+        m = self.bot.monitor_message_map()
+        reserved = m.reserve(SOURCE, TARGET, [3, 7])
+        wrong = dict(reserved); wrong[7] += 1
+        with self.assertRaises(app.CopyOutcomeUnknown): m.start_tdl_upload(SOURCE, TARGET, wrong)
+        self.assertEqual(m.db.execute('SELECT DISTINCT transport FROM monitor_copy_intents').fetchall(), [('telegram',)])
+
+    async def test_cancel_during_download_releases_all_and_cleans_files(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        entered, paths = asyncio.Event(), []
+        async def hang(link, path):
+            paths.append(Path(path).parent); entered.set(); await asyncio.Future()
+        self.bot.tdl.download_media.side_effect = hang
+        await self.enqueue(self.event(3, 7, album=99))
+        worker = asyncio.create_task(self.process())
+        await asyncio.wait_for(entered.wait(), 2); worker.cancel()
+        with self.assertRaises(asyncio.CancelledError): await worker
+        self.assertEqual([self.state(i) for i in (3,7)], [app.TaskStatus.PENDING]*2)
+        self.assertFalse(self.publications())
+        self.assertTrue(all(not p.exists() for p in paths))
+
+    async def test_cancel_during_publish_keeps_whole_album_unconfirmed(self):
+        self.restrict(photo(3, 99), photo(7, 99))
+        entered = asyncio.Event()
+        async def rpc(req):
+            if isinstance(req, F.SendMultiMediaRequest):
+                entered.set(); await asyncio.Future()
+            return await self.rpc(req)
+        self.bot.client.forward.side_effect = rpc
+        await self.enqueue(self.event(3, 7, album=99))
+        worker = asyncio.create_task(self.process())
+        await asyncio.wait_for(entered.wait(), 2); worker.cancel()
+        with self.assertRaises(asyncio.CancelledError): await worker
+        self.assertEqual([self.state(i) for i in (3,7)], [app.TaskStatus.UNCONFIRMED]*2)
+
+    async def test_only_restricted_forward_triggers_fallback(self):
+        self.restrict(photo(5))
+        for mid, error in enumerate((app.errors.ChatWriteForbiddenError(None), app.errors.ChannelPrivateError(None),
+                                     app.errors.ChatAdminRequiredError(None), ConnectionError('lost')), start=1):
+            self.bot.client.forward.side_effect = error
+            await self.enqueue(self.event(mid))
+            with self.assertLogs(app.logger, 'ERROR'): await self.process()
+        self.bot.tdl.download_media.assert_not_awaited()
+
+    async def test_disabled_switch(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5))
+        with patch.object(app, 'MONITOR_TDL_FALLBACK', False), self.assertLogs(app.logger, 'ERROR'):
+            self.assertEqual((await self.process()).status, app.TaskStatus.FAILED)
+        self.bot.tdl.download_media.assert_not_awaited()
+
+    async def test_legacy_completion_deduplicated_without_inventing_mapping(self):
+        self.restrict(photo(5))
+        m = self.bot.monitor_message_map()
+        nonce = m.reserve(SOURCE, TARGET, [5])[5]
+        m.start_tdl_clone(SOURCE, 5, TARGET, nonce); m.complete_tdl_clone(SOURCE, 5, TARGET, nonce)
+        await self.enqueue(self.event(5))
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.bot.client.forward.assert_not_awaited()
+        self.assertIsNone(m.get(SOURCE, 5, TARGET))
+
+    async def test_cleanup_retains_clone_deduplication(self):
+        self.restrict(photo(5))
+        await self.enqueue(self.event(5)); await self.process()
+        with patch.object(app.time, 'time', return_value=9999999999): self.bot.monitor_message_map().cleanup_if_due(7)
+        await self.enqueue(self.event(5))
+        self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.assertEqual(len(self.publications()), 1)
+
+    async def test_download_command_single_member_noninteractive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '5.bin'
+            async def run(cmd, *args): path.write_bytes(b'12345678'); return 0, '', ''
+            with patch.object(self.bot.tdl, '_run_command', side_effect=run) as command:
+                await self.bot.tdl.download_media(f'https://t.me/c/{SOURCE}/5', str(path))
+            self.assertEqual(command.call_args.args[0], [app.TDL_PATH, 'download', '--url',
+                f'https://t.me/c/{SOURCE}/5', '--dir', directory, '--template', '5.bin', '--restart'])
+
+    async def test_manual_clone_zero_exit_with_message_error_still_fails(self):
+        async def run(cmd, progress, *, on_record):
+            on_record(f'Source({SOURCE}):5 -> Target({TARGET}) error: upload failed')
+            return 0, '', ''
+        with patch.object(self.bot.tdl, '_run_command', side_effect=run):
+            ok, output = await self.bot.tdl.forward_clone(f'https://t.me/c/{SOURCE}/5', TARGET)
+        self.assertFalse(ok)
+        self.assertIn('upload failed', output)
+
+
+class ReceiptTests(unittest.TestCase):
+    def test_short_single_message_receipt(self):
+        response = T.UpdateShortSentMessage(42, 1, 1, datetime.now(timezone.utc))
+        self.assertEqual(app.receipt_pairs(response, {5: 55}), {5: 42})
+        self.assertEqual(app.receipt_pairs(response, {5: 55, 7: 77}), {})
+
+    def test_unrelated_updates_are_not_used_as_mapping(self):
+        self.assertEqual(app.receipt_pairs(NS(updates=[T.UpdateMessageID(1, 999)]), {5: 55}), {})
+
+    def test_conflicting_or_duplicate_or_invalid_ids_rejected(self):
+        for updates in ([T.UpdateMessageID(1, 55), T.UpdateMessageID(2, 55)],
+                        [T.UpdateMessageID(1, 55), T.UpdateMessageID(1, 77)],
+                        [T.UpdateMessageID(-1, 55)]):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                app.receipt_pairs(NS(updates=updates), {5: 55, 7: 77})
