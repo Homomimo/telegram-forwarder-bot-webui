@@ -39,6 +39,8 @@ DANGERS = {
     'reviewclear': (('/queue', 'done', 'all'), '从列表移除全部待核对记录。不会删除频道消息，也不会重新发送。'),
     'monclear': (('/monitor', 'clear'), '清空当前运行中的全部监听源。不会删除频道消息。'),
     'logclear': (('/flog', 'clear'), '清空全部本地转发记录。不会删除频道消息或同步映射。'),
+    'mapclear': (('clear_mappings',), '清理全部已确认的源帖映射。源帖和目标帖会保留，'
+                 '已清理的对应关系将无法用于自动编辑同步或手动同步，已复制的帖子不会因此重发。'),
     'stop': (('/tdlstop',), '停止当前手动转发，清空等待任务和定时重试；已开始的自动同步不会被强停。'),
     'restart': (('/restart',), '重启机器人进程。运行中的任务可能中断，临时配置和面板输入不会保留。'),
 }
@@ -167,6 +169,8 @@ class AdminPanel:
         if page < pages:
             navigation.append(('下一页', f'mappings:{page + 1}'))
         buttons = [navigation] if navigation else []
+        if result['total']:
+            buttons.append([('🗑 清理全部映射…', 'ask:mapclear')])
         buttons.append([('🔄 刷新', f'mappings:{page}'), *BACK])
         return '\n\n'.join(lines), buttons
 
@@ -268,8 +272,12 @@ class AdminPanel:
             return
         async with self._lock(uid):
             s = self.sessions.get(uid)
-            if not self.allowed(uid) or not s or event.message_id != s.mid or event.data not in s.choices:
+            if not self.allowed(uid):
+                return
+            if not s or event.message_id != s.mid or event.data not in s.choices:
                 await event.answer('按钮已失效，请使用最新面板或发送 /start。', alert=True)
+                if s and event.message_id != s.mid:
+                    await self._remove_old_keyboard(event)
                 return
             action = s.choices[event.data]
             # A failed navigation can keep its previous keyboard. Execution must never be replayed.
@@ -304,6 +312,24 @@ class AdminPanel:
                         logger.warning('未能发送面板切换失败提示', exc_info=True)
                 else:
                     await self._unavailable(s)
+
+    async def _remove_old_keyboard(self, event):
+        # Pre-upgrade panels lack a stored message ID. A click identifies the exact message.
+        uid, mid = event.sender_id, event.message_id
+        if self.journal.is_active_panel(self.bot_id, uid, mid):
+            return
+        try:
+            message = await event.get_message()
+            markup = getattr(message, 'reply_markup', None)
+            if not getattr(message, 'out', False) or not isinstance(markup, types.ReplyInlineMarkup):
+                return
+            if not any(isinstance(button, types.KeyboardInlineButton)
+                       and isinstance(button.type, types.InlineButtonTypeCallback) and button.type.data == event.data
+                       for row in markup.rows for button in row.buttons):
+                return
+            await self.bot.client.delete_messages(uid, [mid])
+        except Exception:
+            logger.debug('无法清理已点击的旧面板', exc_info=True)
 
     async def _unavailable(self, s):
         self.sessions.pop(s.owner, None)
@@ -395,37 +421,40 @@ class AdminPanel:
         reply_id = getattr(event.message, 'reply_to_msg_id', None)
         if not reply_id or uid != event.chat_id or not uid or uid <= 0:
             return False
-        s = self.sessions.get(uid)
-        if not s or s.prompt_id != reply_id:
-            # The visible marker on our own prompt survives expiry, cancellation and process restart.
-            try:
-                original = await event.get_reply_message()
-            except Exception:
-                original = None
-            if original is None or isinstance(original, types.MessageEmpty):
-                if self.allowed(uid):
-                    await self._error_notice(event.respond, '无法识别被回复的消息，原提示可能已失效。未执行或投稿，请重新打开面板或单独发送。')
-                return True
-            if not original.out or not (original.raw_text or '').startswith(PROMPT):
-                return False
-        if not self.allowed(uid):
-            return True
         async with self._lock(uid):
             s = self.sessions.get(uid)
+            if self.journal.panel_reply_handled(self.bot_id, uid, event.message.id):
+                return True
+            value = (event.raw_text or '').strip()
+            invalid_input = event.message.forward or (event.message.media and not isinstance(
+                event.message.media, types.MessageMediaWebPage))
+            if not s or s.prompt_id != reply_id:
+                try:
+                    original = await event.get_reply_message()
+                except Exception:
+                    original = None
+                missing = original is None or isinstance(original, types.MessageEmpty)
+                if not missing and (not original.out or not (original.raw_text or '').startswith(PROMPT)):
+                    return False
+                if self.allowed(uid):
+                    self.journal.remember_panel_reply(self.bot_id, uid, event.message.id)
+                    if value != '取消' or invalid_input:
+                        text = ('无法识别被回复的消息，原提示可能已失效。未执行或投稿，请重新打开面板或单独发送。'
+                                if missing else '此输入提示已失效，未执行或投稿。请使用最新面板。')
+                        await self._error_notice(event.respond, text, reply_to=event.message.id)
+                return True
             if not self.allowed(uid):
                 return True
-            if not s or s.prompt_id != reply_id:
-                await self._error_notice(event.respond, '此输入提示已失效，未执行或投稿。请使用最新面板。', reply_to=event.message.id)
-                return True
+            self.journal.remember_panel_reply(self.bot_id, uid, event.message.id)
             self._end_wait(s)  # a second reply cannot consume the same prompt
             result = partial(self._input_result, s, event)
             try:
                 if time.monotonic() >= s.expires:
                     await result('⌛ 输入已过期，未执行或投稿。')
-                elif event.message.forward or (event.message.media and not isinstance(event.message.media, types.MessageMediaWebPage)):
+                elif invalid_input:
                     await result('请回复纯文本或原帖链接，不要转发消息。未执行或投稿。')
                 else:
-                    await self._submit(s, event, (event.raw_text or '').strip(), result)
+                    await self._submit(s, event, value, result)
             except Exception:
                 await self._unavailable(s)
             return True
@@ -535,6 +564,14 @@ class AdminPanel:
             await result('配置已改变或操作已失效。未执行，请重新开始。')
             return
         s.command, s.expires = (), 0
+        if cmd == ('clear_mappings',):
+            try:
+                removed = await self.bot.clear_monitor_mappings()
+            except ValueError as exc:
+                await result(str(exc))
+            else:
+                await result(f'✅ 已清理 {removed} 条源帖映射。')
+            return
         if cmd[:2] == ('/monitor', 'add'):
             result = partial(result, receipt_kind='command')
         await self.bot.run_admin_action(event, list(cmd), result, panel_feedback=True)

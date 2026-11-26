@@ -66,10 +66,10 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         markup = TelegramClient.build_reply_markup(self.page.buttons)
         return next(b.type.data for row in markup.rows for b in row.buttons if b.text == label)
 
-    async def hit(self, data, uid=UID, chat=UID, mid=None, via_inline=False):
+    async def hit(self, data, uid=UID, chat=UID, mid=None, via_inline=False, message=None):
         ev = NS(data=data, sender_id=uid, chat_id=chat, message_id=self.session.mid if mid is None else mid,
                 via_inline=via_inline, answer=AsyncMock(), respond=AsyncMock(side_effect=lambda t, **kw: self.send(chat,t,**kw)),
-                client=self.client)
+                client=self.client, get_message=AsyncMock(return_value=message))
         await self.cb(ev)
         return ev
 
@@ -109,6 +109,46 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('已失效', old.respond.await_args.args[0])
         self.bot.do_forward.assert_not_awaited()
         self.assertTrue(self.bot.task_queue.queue.empty())
+
+    async def test_replayed_cancel_after_restart_never_reports_missing_prompt(self):
+        await self.click('🔄 手动同步')
+        prompt = self.session.prompt_id
+        cancel = await self.reply('取消')
+        self.assert_input_receipt(cancel, '已取消')
+        self.assertNotIn(prompt, self.messages)
+        await self.text('/start')
+        self.bot.admin_panel.sessions.clear()
+        self.bot.task_queue.journal.close()
+        self.bot._bot_message_ids.clear()
+        cancel.respond.reset_mock()
+        cancel.get_reply_message.return_value = None
+        await self.new(cancel)
+        cancel.respond.assert_not_awaited()
+        cancel.get_reply_message.assert_not_awaited()
+        (await self.text('取消', reply=prompt)).respond.assert_not_awaited()
+        self.bot.do_forward.assert_not_awaited()
+
+    async def test_start_reopens_home_when_telegram_is_still_replying_to_prompt(self):
+        await self.click('🔄 手动同步')
+        prompt = self.session.prompt_id
+        opened = await self.text('/start', reply=prompt)
+        opened.respond.assert_awaited_once()
+        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+        self.assertEqual(list(self.messages), [self.page.id])
+        self.assertFalse(self.session.prompt_id)
+
+    async def test_clicking_legacy_panel_cleans_only_its_verified_message(self):
+        current = self.page
+        key = self.button('🎯 目标频道')
+        legacy = self.send(UID, '旧面板', buttons=current.buttons)
+        legacy.reply_markup = TelegramClient.build_reply_markup(legacy.buttons)
+        failed = await self.hit(key + b'forged', mid=legacy.id, message=legacy)
+        self.assertTrue(failed.answer.await_args.kwargs['alert'])
+        self.assertIn(legacy.id, self.messages)
+        await self.hit(key, mid=legacy.id, message=legacy)
+        self.assertEqual(list(self.messages), [current.id])
+        await self.text('/start')
+        self.assertIs(self.page, current)
 
     async def test_prompt_failure_preserves_old_panel(self):
         root = self.page
@@ -191,6 +231,22 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         group = await self.text('/mappings', chat=-456)
         self.assertIn('私聊', group.respond.await_args.args[0])
         self.assertNotIn('https://', group.respond.await_args.args[0])
+
+    async def test_mappings_clear_requires_panel_confirmation_and_retains_deduplication(self):
+        mappings = self.bot.monitor_message_map()
+        mappings.remember(SOURCE, TARGET, {42: 101})
+        await self.click('🔗 源帖映射')
+        await self.click('🗑 清理全部映射…')
+        await self.click('取消')
+        self.assertEqual(mappings.get(SOURCE, 42, TARGET), 101)
+        await self.click('🔗 源帖映射')
+        await self.click('🗑 清理全部映射…')
+        await self.click('确认执行')
+        self.assertIn('已清理 1 条源帖映射', self.page.raw_text)
+        self.assertEqual(mappings.copy_state(SOURCE, 42, TARGET), app.TaskStatus.COMPLETED)
+        await self.text('/mappings')
+        self.assertIn('暂无已确认的源帖映射', self.page.raw_text)
+        self.assertNotIn('ask:mapclear', self.session.choices.values())
 
     async def test_webui_url_only_appears_beside_source_mappings_in_configured_private_home(self):
         label = '🌐 打开 WebUI'

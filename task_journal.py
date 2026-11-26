@@ -27,6 +27,8 @@ class TaskJournal:
                            'PRIMARY KEY(job,source))')
                 db.execute('CREATE TABLE IF NOT EXISTS admin_panels(bot INTEGER, owner INTEGER, mid INTEGER, '
                            'kind TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(bot,owner,mid))')
+                db.execute('CREATE TABLE IF NOT EXISTS admin_panel_replies(bot INTEGER, owner INTEGER, mid INTEGER, '
+                           'PRIMARY KEY(bot,owner,mid))')
             except sqlite3.Error:
                 db.close()
                 raise
@@ -37,6 +39,21 @@ class TaskJournal:
         row = self.open().execute("SELECT mid FROM admin_panels WHERE bot=? AND owner=? AND active=1 "
                                   "AND kind='panel'", (bot, owner)).fetchone()
         return row[0] if row else 0
+
+    def is_active_panel(self, bot, owner, mid):
+        return self.open().execute('SELECT 1 FROM admin_panels WHERE bot=? AND owner=? AND mid=? AND active=1',
+                                   (bot, owner, mid)).fetchone() is not None
+
+    def panel_reply_handled(self, bot, owner, mid):
+        return self.open().execute('SELECT 1 FROM admin_panel_replies WHERE bot=? AND owner=? AND mid=?',
+                                   (bot, owner, mid)).fetchone() is not None
+
+    def remember_panel_reply(self, bot, owner, mid):
+        with self.open() as db:
+            db.execute('INSERT OR IGNORE INTO admin_panel_replies VALUES(?,?,?)', (bot, owner, mid))
+            db.execute('DELETE FROM admin_panel_replies WHERE bot=? AND owner=? AND mid < ('
+                       'SELECT mid FROM admin_panel_replies WHERE bot=? AND owner=? '
+                       'ORDER BY mid DESC LIMIT 1 OFFSET 127)', (bot, owner, bot, owner))
 
     def activate_panel(self, bot, owner, mid, kind):
         # Commit the new pointer and the outstanding deletions before contacting Telegram again.

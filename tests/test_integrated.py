@@ -3,6 +3,8 @@
 import json
 import tempfile
 import unittest
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -77,6 +79,50 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         handler.do_GET()
         handler.server.console.dispatch.assert_called_once_with('mappings', {'page': '2'})
         handler.reply.assert_called_with(200, last)
+
+    async def test_web_clear_mappings_requires_confirmation_and_preserves_copy_state(self):
+        from console_http import Console, Handler
+
+        bot = self.bot
+        bot.task_queue.running = True
+        console = Console(bot, app, bot.console_data)
+        mappings = bot.monitor_message_map()
+        mappings.remember(SOURCE, TARGET, {1: 101})
+        mappings.reserve(SOURCE, TARGET, [2])
+        with self.assertRaisesRegex(ValueError, '请确认'):
+            await console.command('clear-mappings', {})
+        with patch.object(bot.task_queue, 'current_task', SimpleNamespace(mode='monitor_edit')):
+            with self.assertRaisesRegex(ValueError, '正在同步'):
+                await console.command('clear-mappings', {'confirmed': True})
+        self.assertEqual(mappings.get(SOURCE, 1, TARGET), 101)
+        result = await console.command('clear-mappings', {'confirmed': True})
+        self.assertEqual(result, {'removed': 1})
+        self.assertEqual(mappings.list_mappings(1, 10)['rows'], [])
+        self.assertEqual(mappings.copy_state(SOURCE, 1, TARGET), app.TaskStatus.COMPLETED)
+        self.assertFalse(mappings.can_await_mapping(SOURCE, 1, TARGET))
+        self.assertEqual(mappings.copy_state(SOURCE, 2, TARGET), app.TaskStatus.UNCONFIRMED)
+        self.assertEqual(await console.command('clear-mappings', {'confirmed': True}), {'removed': 0})
+
+        handler = object.__new__(Handler)
+        handler.path = '/api/clear-mappings'
+        handler.allowed = Mock(return_value=True)
+        handler.session = Mock(return_value='valid')
+        handler.reply = Mock()
+        handler.server = SimpleNamespace(console=SimpleNamespace(dispatch=Mock(return_value=result)))
+        body = b'{"confirmed":true}'
+        handler.headers = Message()
+        for key, value in {'Content-Type': 'application/json', 'Content-Length': str(len(body)),
+                           'X-Relay-Request': '1', 'X-CSRF-Token': 'wrong'}.items():
+            handler.headers[key] = value
+        handler.rfile = BytesIO(body)
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[0], 403)
+        handler.server.console.dispatch.assert_not_called()
+        handler.headers.replace_header('X-CSRF-Token', 'valid')
+        handler.rfile.seek(0)
+        handler.do_POST()
+        handler.server.console.dispatch.assert_called_once_with('clear-mappings', {'confirmed': True})
+        handler.reply.assert_called_with(200, result)
 
     async def test_name_shared_between_bot_and_web_without_changing_routing(self):
         from console_http import Console

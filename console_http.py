@@ -87,6 +87,9 @@ class Console:
                 else "仅 Bot / 用户会话未连接",
             )
         check(queue.running and not bot._stopping, "Bot 队列尚未就绪")
+        if op == "clear-mappings":
+            check(p.get("confirmed") is True, "请确认清理全部源帖映射")
+            return {"removed": await bot.clear_monitor_mappings()}
         if op == "preview-channel":
             cid, title = await bot.resolve_channel(p.get("channel", ""))
             return {
@@ -350,9 +353,8 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
             result = self.server.console.dispatch(self.path[5:], p)
-            self.reply(
-                200, result if self.path == "/api/preview-channel" else {"id": result}
-            )
+            self.reply(200, result if self.path in ("/api/preview-channel", "/api/clear-mappings")
+                       else {"id": result})
         except (TimeoutError, sqlite3.Error, OSError):
             self.reply(503, {"error": "服务忙或存储不可用，请刷新核对状态"})
         except (ValueError, KeyError, TypeError) as e:

@@ -1561,16 +1561,24 @@ class MonitorMessageMap:
             last = self.db.execute("SELECT last_run FROM monitor_cleanup WHERE id=1").fetchone()
             if last and 0 <= now - last[0] < MONITOR_CLEANUP_INTERVAL:
                 return MONITOR_CLEANUP_INTERVAL - (now - last[0])
-            cutoff = now - retention_days * 86400
-            self.db.execute("""
-                INSERT OR IGNORE INTO monitor_pruned_ids (source_chat_id, source_message_id, target_chat_id)
-                SELECT source_chat_id, source_message_id, target_chat_id FROM monitor_messages WHERE confirmed_at <= ?
-            """, (cutoff,))
-            removed = self.db.execute("DELETE FROM monitor_messages WHERE confirmed_at <= ?", (cutoff,)).rowcount
+            removed = self._prune_mappings(now - retention_days * 86400)
             self.db.execute("INSERT OR REPLACE INTO monitor_cleanup (id, last_run) VALUES (1, ?)", (now,))
         logger.info("monitor-data 清理完成：移除 %s 条已确认映射，保留期 %s 天，耗时 %.3f 秒",
                     removed, retention_days, time.monotonic() - started)
         return MONITOR_CLEANUP_INTERVAL
+
+    def _prune_mappings(self, cutoff=None) -> int:
+        # The caller holds a write transaction so deduplication and removal are committed together.
+        where, args = ('', ()) if cutoff is None else (' WHERE confirmed_at <= ?', (cutoff,))
+        self.db.execute(
+            'INSERT OR IGNORE INTO monitor_pruned_ids (source_chat_id, source_message_id, target_chat_id) '
+            'SELECT source_chat_id, source_message_id, target_chat_id FROM monitor_messages' + where, args)
+        return self.db.execute('DELETE FROM monitor_messages' + where, args).rowcount
+
+    def clear_mappings(self) -> int:
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            return self._prune_mappings()
 
     def reserve(self, source_chat_id: int, target_chat_id: int, ids: list[int], *, whole_album=False) -> dict[int, int]:
         """RPC 前提交意图；已有映射或未确认的意图都不能重新发送。"""
@@ -3478,6 +3486,15 @@ class TelegramBot:
             row['target_label'] = self.channel_label(row['target_channel'])
         return result
 
+    async def clear_monitor_mappings(self) -> int:
+        async with self._monitor_db_lock:
+            if self._stopping:
+                raise ValueError('Bot 正在停止，请稍后重试。')
+            current = self.task_queue.current_task
+            if current and current.mode == 'monitor_edit':
+                raise ValueError('正在同步目标帖，请等本次同步结束后再清理。')
+            return self.monitor_message_map().clear_mappings()
+
     @staticmethod
     def cleanup_monitor_db(path: str, retention_days: int) -> int:
         with closing(MonitorMessageMap(path)) as mappings:
@@ -3531,14 +3548,16 @@ class TelegramBot:
                 self._bot_message_ids[message_key] = None
                 if len(self._bot_message_ids) > BOT_MESSAGE_CACHE_SIZE:
                     self._bot_message_ids.pop(next(iter(self._bot_message_ids)))
-                if await self.admin_panel.reply(event):
-                    return  # A reply to our input prompt must never fall through to manual forwarding.
                 # Forward headers and broadcast posts are data, even if the caption is an admin command.
                 forwarded = bool(event.message.forward)
                 parts = text.split(maxsplit=1)
                 match = (re.fullmatch(r"(/[A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?", parts[0])
                          if parts and not forwarded and not event.out else None)
                 command = match[1].lower() if match else None
+                # Telegram may leave ForceReply selected when an administrator uses /start to recover.
+                private_start = command == '/start' and event.chat_id == event.sender_id and event.sender_id in ADMIN_IDS
+                if not private_start and await self.admin_panel.reply(event):
+                    return  # Other prompt replies must never fall through to commands or forwarding.
                 if command:
                     if not await self.command_is_for_me(match[2]):
                         return

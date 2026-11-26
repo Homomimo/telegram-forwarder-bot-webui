@@ -210,7 +210,8 @@ function draw() {
     } else if (!mappingError) {
       content = '<p class="hint" role="status">正在读取源帖映射…</p>';
     }
-    body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1));
+    const clear = mappings?.total && !mappingError ? btn("clearMappings", "清理全部映射…") : "";
+    body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1) + clear);
   } else {
     body += card(
       "目标频道",
@@ -335,6 +336,17 @@ function configureChannel(isTarget) {
 }
 const handlers = {
   mappingPage: (id) => loadMappings(id),
+  clearMappings: () =>
+    modal(
+      "清理全部源帖映射",
+      "<p>源帖和目标帖会保留。清理后，已有对应关系将无法用于自动编辑同步或手动同步。已复制的帖子不会因此重发。</p>",
+      "确认清理",
+      async () => {
+        const { removed } = await act("clear-mappings", { confirmed: true });
+        await loadMappings(1);
+        notify(`已清理 ${removed} 条源帖映射`);
+      },
+    ),
   new: () => newTask(),
   target: () => configureChannel(true),
   rename: (id) => {
