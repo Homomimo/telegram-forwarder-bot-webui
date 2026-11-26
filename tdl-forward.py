@@ -83,6 +83,7 @@ MONITOR_MAP_FILE = os.getenv("MONITOR_MAP_FILE", "").strip() or "monitor_message
 MONITOR_ADMISSION_DELAYS = (1, 3)
 MONITOR_ALERT_WINDOW = 1.0
 MANUAL_ALBUM_CACHE_SIZE = 500
+BOT_MESSAGE_CACHE_SIZE = 1024
 MONITOR_ALBUM_WAIT = 1.0  # seconds from the first grouped NewMessage
 MONITOR_EARLY_EDIT_LIMIT = 4096
 USER_MONITOR_RETRY_SECONDS = 30
@@ -239,13 +240,15 @@ class ForwardTask:
         return (self.source_chat_id, self.message_ids[0], self.target_chat_id)
 
 
-async def edit_status(message, text: str) -> None:
+async def edit_status(message, text: str) -> bool:
     if message is None:
-        return
+        return False
     try:
         await asyncio.wait_for(message.edit(text, parse_mode=None, link_preview=False), STATUS_RPC_TIMEOUT)
     except Exception as exc:
         logger.debug("状态提示未更新：%s", type(exc).__name__)
+        return False
+    return True
 
 
 async def send_status(event, text: str):
@@ -1970,6 +1973,7 @@ class TelegramBot:
         self._album_processed: dict[tuple[int, int], None] = {}
         self._album_read_ready_at: dict[str, float] = {}
         self._forward_status_ids: dict[tuple[int, int], None] = {}
+        self._bot_message_ids: dict[tuple[int, int], None] = {}
         self._stopping = False
         self._delete_tasks: set[asyncio.Task] = set()
         self.restart_requested = False
@@ -3426,20 +3430,20 @@ class TelegramBot:
             )
             if position is None:
                 reason = self.task_queue.admission_error(admission_epoch=epoch)
-                await edit_status(status_msg, reason)
+                await edit_status(status_msg, '未入队。原因见批量转发确认卡。' if panel_feedback else reason)
                 self.schedule_status_delete(status_msg, failed=True)
                 if panel_feedback:
                     await respond(reason)
                 return True
-            await edit_status(status_msg,
+            text = (
                 f"⏳ 已加入范围导出队列\n"
                 f"队列位置: {position}\n"
                 f"范围：{start_id}-{end_id}\n"
                 + self.transfer_context(display_link, target_id, source=chat_id, first=start_id)
             )
+            updated = await edit_status(status_msg, text)
             if panel_feedback:
-                await respond(f"⏳ 范围任务已入队：{start_id} 至 {end_id}。进度可在任务队列查看。\n"
-                              + self.transfer_context(display_link, target_id, source=chat_id, first=start_id))
+                await respond('转发进度见状态消息，也可在任务队列查看。' if updated else text)
             return True
 
         return False
@@ -3518,6 +3522,13 @@ class TelegramBot:
                 if event.out or (isinstance(peer, types.PeerChannel) and
                                  (event.message.post or peer.channel_id == self.monitor_target_channel_id())):
                     return
+                # Claim the update before a reply lookup or command can yield to a duplicate.
+                message_key = (event.chat_id, event.message.id)
+                if message_key in self._bot_message_ids:
+                    return
+                self._bot_message_ids[message_key] = None
+                if len(self._bot_message_ids) > BOT_MESSAGE_CACHE_SIZE:
+                    self._bot_message_ids.pop(next(iter(self._bot_message_ids)))
                 if await self.admin_panel.reply(event):
                     return  # A reply to our input prompt must never fall through to manual forwarding.
                 # Forward headers and broadcast posts are data, even if the caption is an admin command.

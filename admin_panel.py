@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from html import escape
 
-from telethon import Button, types
+from telethon import Button, errors, types
 from forward_records import PAGE_SIZE, history_list, history_detail
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ class Session:
     choices: dict[bytes, str] = field(default_factory=dict)
     history_ids: set | None = None
     root_mid: int = 0  # original /start or /help; never delete this message
+    home_root: bool = False  # The startup and /start panel has no scheduled deletion.
     card: object = None  # a separately sent card that currently owns the keyboard
     prompt: object = None
     timer: asyncio.Task | None = None
@@ -111,7 +112,8 @@ class AdminPanel:
         async with self._lock(uid):
             if not self.allowed(uid):
                 return
-            session = Session(uid)
+            session = Session(uid, home_root=not guide and history is None and mappings is None)
+            previous = self.sessions.get(uid)
             if mappings is not None:
                 text, rows = await self.mappings_view(mappings)
                 if not self.allowed(uid):
@@ -119,11 +121,17 @@ class AdminPanel:
             else:
                 text, rows = (self.history_view(session, history) if history is not None else
                               (self.guide, [BACK]) if guide else self.home_view())
-            msg = await send(text, link_preview=False, buttons=self._keyboard(session, rows),
-                             **({'parse_mode': 'html'} if history is not None or mappings is not None else {}))
-            session.root_mid = session.mid = msg.id
+            if session.home_root and previous and previous.home_root:
+                session.root_mid = session.mid = previous.root_mid
+                try:
+                    await self._screen(session, text, rows)
+                except (errors.MessageIdInvalidError, errors.MessageEditTimeExpiredError):
+                    session.root_mid = session.mid = 0
+            if not session.root_mid:
+                msg = await send(text, link_preview=False, buttons=self._keyboard(session, rows),
+                                 **({'parse_mode': 'html'} if history is not None or mappings is not None else {}))
+                session.root_mid = session.mid = msg.id
             if self.allowed(uid):
-                previous = self.sessions.get(uid)
                 if previous:
                     self._retire(previous)
                 self.sessions[uid] = session
@@ -504,7 +512,7 @@ class AdminPanel:
             return
         self.bot.schedule_panel_receipt(receipt, receipt_kind)
         try:
-            await self._result(s, text)
+            await self._result(s, '处理结果见本次输入下方的回复。')
         except Exception:
             self.sessions.pop(s.owner, None)
             self._retire(s)

@@ -200,6 +200,27 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Telethon 用户会话：想用个人 Telegram 账号监听源频道时', self.page.raw_text)
         await self.click('⬅️ 返回面板')
 
+    async def test_start_refreshes_the_startup_panel_without_sending_another(self):
+        root = self.page
+        await self.click('⚙️ 系统管理')
+        first = await self.text('/start')
+        await self.new(first)
+        second = await self.text('/start')
+        self.assertIs(self.page, root)
+        self.assertEqual(root.raw_text, app.START_MESSAGE_ADMIN)
+        first.respond.assert_not_awaited()
+        second.respond.assert_not_awaited()
+        self.client.send_message.assert_awaited_once()
+        await self.click('🎯 目标频道')
+
+    async def test_start_sends_replacement_when_the_old_panel_cannot_be_edited(self):
+        old_mid = self.session.mid
+        with patch.object(self.client.edit_message, 'side_effect', app.errors.MessageIdInvalidError(None)):
+            event = await self.text('/start')
+        event.respond.assert_awaited_once()
+        self.assertNotEqual(self.session.mid, old_mid)
+        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+
     async def test_button_owner_generation_and_message_binding(self):
         key = self.button('🎯 目标频道')
         for kw in (dict(uid=71, chat=71), dict(uid=71), dict(chat=-90), dict(mid=999), dict(via_inline=True)):
@@ -213,18 +234,38 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ev.answer.await_args.kwargs['alert'])
         ev = await self.hit(key + b'forged')
         self.assertTrue(ev.answer.await_args.kwargs['alert'])
+        self.client.edit_message.assert_not_awaited()
         old_mid = self.session.mid
         await self.text('/start')
+        self.client.edit_message.reset_mock()
         stale = await self.hit(key, mid=old_mid)
         self.assertTrue(stale.answer.await_args.kwargs['alert'])
         self.client.edit_message.assert_not_awaited()
 
-    def assert_input_receipt(self, event, expected):
+    def assert_input_receipt(self, event, expected, *, confirmation=False):
         event.respond.assert_awaited_once()
         call = event.respond.await_args
         self.assertEqual(call.kwargs['reply_to'], event.message.id)
         self.assertIn(expected, call.args[0])
-        self.assertEqual(call.args[0], self.page.raw_text)
+        panel_text = call.args[0] if confirmation else '处理结果见本次输入下方的回复。'
+        self.assertEqual(self.page.raw_text, panel_text)
+
+    async def test_replayed_commands_and_plain_submissions_are_only_handled_once(self):
+        query = await self.text('/showto')
+        await self.new(query)
+        query.respond.assert_awaited_once()
+
+        command = await self.text(f'/export_range {SOURCE} 100 110')
+        await self.new(command)
+        command.respond.assert_awaited_once()
+        self.assertEqual(self.bot.task_queue.queue.qsize(), 1)
+
+        link = f'https://t.me/c/{SOURCE}/7'
+        submission = await self.text(link)
+        await self.new(submission)
+        self.bot.do_forward.assert_awaited_once_with(submission)
+        await self.text(link)
+        self.assertEqual(self.bot.do_forward.await_count, 2)
 
     async def test_sync_is_reply_only_and_mapped_edit_only(self):
         self.bot.monitor_message_map().remember(SOURCE, TARGET, {7: 91})
@@ -234,19 +275,25 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(self.messages[prompt].buttons, types.ReplyKeyboardForceReply)
         await self.text(link)
         self.bot.do_forward.assert_awaited_once()
-        self.assert_input_receipt(await self.reply(link), '任务已入队，尚未完成同步。')
-        self.assertIn(f'https://t.me/c/{TARGET}/91', self.page.raw_text.split())
+        submitted = await self.reply(link)
+        self.assert_input_receipt(submitted, '任务已入队，尚未完成同步。')
+        await self.new(submitted)  # Telegram may deliver the same reply update again.
+        self.assert_input_receipt(submitted, '任务已入队，尚未完成同步。')
+        submitted.get_reply_message.assert_not_awaited()
+        self.assertIn(f'https://t.me/c/{TARGET}/91', submitted.respond.await_args.args[0].split())
         q = self.bot.task_queue.queue
         self.assertEqual(q.qsize(), 1)
         task = q.get_nowait(); q.task_done()
         self.assertEqual((task.mode, task.source_chat_id, task.message_ids, task.target_chat_id),
                          ('monitor_edit', SOURCE, [7], TARGET))
-        await self.text(link, reply=prompt)
+        stale = await self.text(link, reply=prompt)
+        self.assertIn('已失效', stale.respond.await_args.args[0])
         self.assertTrue(q.empty())
         self.bot.do_forward.assert_awaited_once()
         await self.click('⬅️ 返回面板'); await self.click('🔄 手动同步')
-        self.assert_input_receipt(await self.reply(f'https://t.me/c/{SOURCE}/8'), '没有转发映射')
-        self.assertNotIn('https://t.me/', self.page.raw_text)
+        missing = await self.reply(f'https://t.me/c/{SOURCE}/8')
+        self.assert_input_receipt(missing, '没有转发映射')
+        self.assertNotIn('https://t.me/', missing.respond.await_args.args[0])
         self.assertTrue(q.empty())
 
     async def test_sync_input_rejections_reply_to_the_submitted_message(self):
@@ -334,18 +381,22 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.send_message.await_args.kwargs['reply_to'], first.message.id)
         self.assertIn('尚未入队', self.messages[self.session.prompt_id].raw_text)
         last = await self.reply(f'https://t.me/c/{SOURCE}/110')
-        self.assert_input_receipt(last, '待确认')
+        self.assert_input_receipt(last, '待确认', confirmation=True)
         for detail in (str(SOURCE), str(TARGET), '100 至 110'):
             self.assertIn(detail, self.page.raw_text)
         self.assertTrue(self.bot.task_queue.queue.empty())
         confirm = self.button('确认执行')
-        await asyncio.gather(self.hit(confirm), self.hit(confirm))
+        clicks = await asyncio.gather(self.hit(confirm), self.hit(confirm))
         q = self.bot.task_queue.queue
         self.assertEqual(q.qsize(), 1)
         task = q.get_nowait(); q.task_done()
         self.assertEqual((task.mode, task.source_chat_id, task.message_ids, task.target_chat_id),
                          ('export_range', SOURCE, [100,110], TARGET))
         self.assertNotEqual(task.status_msg_id, self.session.mid)
+        self.assertEqual(sum(click.respond.await_count for click in clicks), 1)
+        status = self.messages[task.status_msg_id]
+        self.assertIn('已加入范围导出队列', status.edit.await_args.args[0])
+        self.assertEqual(self.page.raw_text, '转发进度见状态消息，也可在任务队列查看。')
         self.bot.do_forward.assert_not_awaited()
 
     async def test_invalid_export_and_changed_destination_are_never_admitted(self):
@@ -367,7 +418,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await self.click('🎯 目标频道'); await self.click('✏️ 更换目标')
         mid, old = self.session.mid, self.button('取消并返回')
         preview = await self.reply(str(TARGET+1))
-        self.assert_input_receipt(preview, f'{TARGET} → {TARGET+1}')
+        self.assert_input_receipt(preview, f'{TARGET} → {TARGET+1}', confirmation=True)
         self.assertNotEqual(mid, self.session.mid)
         self.assertIsNone(self.messages[mid].buttons)
         self.assertTrue((await self.hit(old, mid=mid)).answer.await_args.kwargs['alert'])
@@ -380,7 +431,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assert_input_receipt(await self.reply('12345'), '已添加自动监听源频道：12345')
         self.assertIn(12345, self.bot.monitor_chat_ids)
         await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('替换整个列表')
-        self.assert_input_receipt(await self.reply('123，456,123'), '123, 456')
+        self.assert_input_receipt(await self.reply('123，456,123'), '123, 456', confirmation=True)
         self.assertNotIn(456, self.bot.monitor_chat_ids)
         await self.click('确认执行'); self.assertEqual(self.bot.monitor_chat_ids, [123,456])
         await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('➖ 点选移除')
@@ -441,9 +492,9 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
             self.bot.do_forward.assert_not_awaited()
             self.bot._restart.assert_not_awaited()
         await self.text('/start'); await self.click('📦 批量转发')
-        await self.reply(f'https://t.me/c/{SOURCE}/2147483648')
+        invalid = await self.reply(f'https://t.me/c/{SOURCE}/2147483648')
         self.assertEqual(self.session.prompt_id, 0)
-        self.assertIn('无效', self.page.raw_text)
+        self.assert_input_receipt(invalid, '无效')
 
     async def test_changed_monitor_list_and_authorization_in_flight(self):
         await self.click('📡 监听频道'); await self.click('清空监听…')
