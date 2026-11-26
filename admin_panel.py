@@ -3,7 +3,7 @@ import asyncio
 import logging
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from html import escape
 
@@ -50,9 +50,7 @@ class Session:
     mid: int = 0
     choices: dict[bytes, str] = field(default_factory=dict)
     history_ids: set | None = None
-    root_mid: int = 0  # original /start or /help; never delete this message
-    home_root: bool = False  # The startup and /start panel has no scheduled deletion.
-    card: object = None  # a separately sent card that currently owns the keyboard
+    result_receipt: bool = False  # Open a fresh home instead of reusing a receipt scheduled for cleanup.
     prompt: object = None
     timer: asyncio.Task | None = None
     stage: str = ''
@@ -67,8 +65,10 @@ class Session:
 
 
 class AdminPanel:
-    def __init__(self, bot, *, allowed, home, guide, source_id, post_link, export_range):
+    def __init__(self, bot, *, bot_id, allowed, home, guide, source_id, post_link, export_range):
         self.bot, self.allowed = bot, allowed
+        self.bot_id = bot_id
+        self.journal = bot.task_queue.journal
         self.home, self.guide = home, guide
         self.webui_url: str | None = None
         self.source_id = source_id
@@ -112,8 +112,7 @@ class AdminPanel:
         async with self._lock(uid):
             if not self.allowed(uid):
                 return
-            session = Session(uid, home_root=not guide and history is None and mappings is None)
-            previous = self.sessions.get(uid)
+            session = Session(uid)
             if mappings is not None:
                 text, rows = await self.mappings_view(mappings)
                 if not self.allowed(uid):
@@ -121,20 +120,9 @@ class AdminPanel:
             else:
                 text, rows = (self.history_view(session, history) if history is not None else
                               (self.guide, [BACK]) if guide else self.home_view())
-            if session.home_root and previous and previous.home_root:
-                session.root_mid = session.mid = previous.root_mid
-                try:
-                    await self._screen(session, text, rows)
-                except (errors.MessageIdInvalidError, errors.MessageEditTimeExpiredError):
-                    session.root_mid = session.mid = 0
-            if not session.root_mid:
-                msg = await send(text, link_preview=False, buttons=self._keyboard(session, rows),
-                                 **({'parse_mode': 'html'} if history is not None or mappings is not None else {}))
-                session.root_mid = session.mid = msg.id
-            if self.allowed(uid):
-                if previous:
-                    self._retire(previous)
-                self.sessions[uid] = session
+            session.mid = self.journal.reusable_panel(self.bot_id, uid)
+            mode = 'html' if history is not None or mappings is not None else None
+            await self._screen(session, text, rows, send=send, parse_mode=mode)
 
     def history_view(self, s, action):
         rows = self.bot.forward_log.get_all()[::-1]
@@ -186,15 +174,7 @@ class AdminPanel:
         if s.timer:
             s.timer.cancel()
             s.timer = None
-        if s.prompt:
-            self.bot.schedule_delete(s.prompt, 30)
-            s.prompt = None
-
-    def _retire(self, s):
-        self._end_wait(s)
-        if s.card:
-            self.bot.schedule_command_delete(s.card)
-            s.card = None
+        s.prompt = None
 
     def _arm_wait(self, s):
         # Start after delivery so network latency does not shorten the input window.
@@ -206,27 +186,12 @@ class AdminPanel:
             if self.sessions.get(s.owner) is not s or s.timer is not asyncio.current_task() or not self.allowed(s.owner):
                 return
             s.timer = None
-            expired, s.prompt = s.prompt, None
+            s.prompt = None
             text = '⌛ 操作已过期，未执行。请返回面板重新开始。'
             try:
-                if s.command and s.card:
-                    # Restore the permanent panel before deleting the expired confirmation.
-                    card, s.mid = s.card, s.root_mid
-                    try:
-                        await self._result(s, text)
-                    except Exception:
-                        s.mid = card.id  # original panel gone: keep this card as the panel
-                        await self._result(s, text)
-                    else:
-                        s.card = None
-                        expired = card
-                else:
-                    await self._result(s, text)
+                await self._result(s, text)
             except Exception:
                 await self._unavailable(s)
-            finally:
-                if expired:
-                    await expired.delete()
 
     async def _error_notice(self, send, text, **kwargs):
         msg = await send(text, **kwargs)
@@ -240,9 +205,59 @@ class AdminPanel:
             return encoded[:8000].decode('utf-16-le', errors='ignore') + '\n…（列表已截短）'
         return text
 
-    async def _screen(self, s, text, rows):
-        await self.bot.client.edit_message(s.owner, s.mid, self._fit(text), buttons=self._keyboard(s, rows),
-                                           parse_mode=None, link_preview=False)
+    async def _screen(self, s, text, rows, *, replace=False, send=None, parse_mode=None):
+        options = dict(buttons=self._keyboard(s, rows), parse_mode=parse_mode, link_preview=False)
+        if parse_mode is None:
+            text = self._fit(text)
+        if s.mid and not replace:
+            try:
+                await self.bot.client.edit_message(s.owner, s.mid, text, **options)
+            except (errors.MessageIdInvalidError, errors.MessageEditTimeExpiredError):
+                pass
+            else:
+                # On open, also finish any cleanup interrupted by a previous shutdown.
+                if send is not None:
+                    await self._activate(s, s.mid, 'panel', edited=True)
+                return
+        deliver = send or partial(self.bot.client.send_message, s.owner)
+        msg = await deliver(text, **options)
+        await self._activate(s, msg.id, 'panel')
+
+    async def _activate(self, s, mid, kind, *, edited=False):
+        try:
+            retired = self.journal.activate_panel(self.bot_id, s.owner, mid, kind)
+        except Exception:
+            if not edited:
+                # The previous pointer is intact. Remove the untracked replacement if possible.
+                try:
+                    await self.bot.client.delete_messages(s.owner, [mid])
+                except Exception:
+                    logger.exception('持久化失败后未能撤回新面板')
+            raise
+        s.mid = 0 if kind == 'prompt' else mid
+        s.result_receipt = kind == 'receipt'
+        previous = self.sessions.get(s.owner)
+        if previous is not s and self.allowed(s.owner):
+            if previous:
+                self._end_wait(previous)
+            self.sessions[s.owner] = s
+        for old_mid, old_kind in retired:
+            try:
+                await self.bot.client.delete_messages(s.owner, [old_mid])
+            except Exception as exc:
+                logger.warning('未能删除旧面板，尝试移除旧按钮', exc_info=True)
+                # Keep a retired input recognizable if someone replies to it later.
+                notice = (PROMPT if old_kind == 'prompt' else '') + '请使用最新的机器人消息。'
+                try:
+                    await self.bot.client.edit_message(s.owner, old_mid, notice, buttons=None)
+                except errors.MessageIdInvalidError:
+                    pass  # The old message is already gone.
+                except Exception:
+                    continue
+                else:
+                    if not isinstance(exc, errors.MessageDeleteForbiddenError):
+                        continue  # Retry transient deletion failures on the next open or replacement.
+            self.journal.forget_retired_panel(self.bot_id, s.owner, old_mid)
 
     async def callback(self, event):
         if not isinstance(event.data, bytes) or not event.data.startswith(PREFIX):
@@ -257,14 +272,16 @@ class AdminPanel:
                 await event.answer('按钮已失效，请使用最新面板或发送 /start。', alert=True)
                 return
             action = s.choices[event.data]
-            s.choices.clear()  # Consume this generation before any network I/O.
+            # A failed navigation can keep its previous keyboard. Execution must never be replayed.
+            previous = replace(s) if not s.command and action != 'confirm' else None
+            s.choices = {}
             self._end_wait(s)
             try:
                 if action == 'confirm':
                     await event.answer('已收到确认，正在核对操作…')
                 elif action == 'cancel':
                     await event.answer('已取消，本次操作未执行。')
-                elif action in PAGES:
+                elif action in PAGES or action == 'target:refresh':
                     await event.answer('正在读取当前状态…')
                 else:
                     await event.answer()
@@ -278,11 +295,19 @@ class AdminPanel:
                     s.command, s.stage, s.expires = (), '', 0
                     await self._navigate(s, event, action)
             except Exception:
-                await self._unavailable(s)
+                if previous and s.mid == previous.mid and self.sessions.get(uid) is s:
+                    self.sessions[uid] = previous
+                    logger.exception('面板切换失败，保留原面板')
+                    try:
+                        await self._error_notice(partial(self.bot.client.send_message, uid), '面板切换失败，请重试或发送 /start。')
+                    except Exception:
+                        logger.warning('未能发送面板切换失败提示', exc_info=True)
+                else:
+                    await self._unavailable(s)
 
     async def _unavailable(self, s):
         self.sessions.pop(s.owner, None)
-        self._retire(s)
+        self._end_wait(s)
         logger.exception('管理面板操作或消息更新失败')
         try:
             await self._error_notice(partial(self.bot.client.send_message, s.owner), '面板未能完成反馈。请用 /start 重开并核对当前状态，不要直接重复操作。')
@@ -291,25 +316,25 @@ class AdminPanel:
 
     async def _navigate(self, s, event, action):
         if action in ('home', 'cancel'):
-            await self._screen(s, *self.home_view())
+            await self._screen(s, *self.home_view(), replace=s.result_receipt)
         elif action == 'help':
             await self._screen(s, self.guide, [BACK])
         elif action == 'system':
             await self._screen(s, '⚙️ 系统管理', [[('🔄 重启机器人…', 'ask:restart')], BACK])
         elif action == 'history' or action.startswith(('hpage:', 'hdetail:')):
             text, rows = self.history_view(s, action)
-            await self.bot.client.edit_message(s.owner, s.mid, text, buttons=self._keyboard(s, rows),
-                                               parse_mode='html', link_preview=False)
+            await self._screen(s, text, rows, parse_mode='html')
         elif action.startswith('mappings:'):
             text, rows = await self.mappings_view(int(action.partition(':')[2]))
-            await self.bot.client.edit_message(s.owner, s.mid, text, buttons=self._keyboard(s, rows),
-                                               parse_mode='html', link_preview=False)
-        elif action in PAGES:
-            cmd, options = PAGES[action]
+            await self._screen(s, text, rows, parse_mode='html')
+        elif action in PAGES or action == 'target:refresh':
+            page = action.removesuffix(':refresh')
+            cmd, options = PAGES[page]
             async def display(text, **kwargs):
-                if action in ('monitor', 'target'):
+                if page in ('monitor', 'target'):
                     text += '\n\n更改备注：/channelname <频道 ID> <备注>'
-                await self._screen(s, text, [*options, [('🔄 刷新', action), *BACK]])
+                refresh = 'target:refresh' if page == 'target' else page
+                await self._screen(s, text, [*options, [('🔄 刷新', refresh), *BACK]], replace=action == 'target')
             await self.bot.run_admin_action(event, [cmd], display)
         elif action.startswith('remove:'):
             ids = self.bot.monitor_chat_ids
@@ -345,13 +370,12 @@ class AdminPanel:
 
     async def _prompt(self, s, stage, *, reply_to=None):
         s.stage = stage
-        await self._screen(s, '⌨️ 等待输入：请回复下方专用提示。直接发送链接仍按普通投稿处理。',
-                           [[('取消并返回', 'cancel')]])
         text = PROMPT + QUESTIONS[stage] + '\n5 分钟内有效；回复「取消」可退出。'
         if stage in ('sync', 'export', 'end'):
             text += f'\n当前目标：{s.guard}'
         prompt = await self.bot.client.send_message(s.owner, text, buttons=Button.force_reply(single_use=True),
                                                     link_preview=False, reply_to=reply_to)
+        await self._activate(s, prompt.id, 'prompt')
         s.prompt = prompt
         self._arm_wait(s)
 
@@ -380,7 +404,7 @@ class AdminPanel:
                 original = None
             if original is None or isinstance(original, types.MessageEmpty):
                 if self.allowed(uid):
-                    await self._error_notice(event.respond, '无法识别被回复的消息，未执行或投稿。请单独发送，或重新打开面板。')
+                    await self._error_notice(event.respond, '无法识别被回复的消息，原提示可能已失效。未执行或投稿，请重新打开面板或单独发送。')
                 return True
             if not original.out or not (original.raw_text or '').startswith(PROMPT):
                 return False
@@ -476,14 +500,8 @@ class AdminPanel:
             except Exception:
                 logger.warning('确认卡片发送失败，尝试更新原面板', exc_info=True)
             else:
-                old_mid = s.mid
-                self._retire(s)
-                s.card, s.mid = card, card.id
+                await self._activate(s, card.id, 'panel')
                 self._arm_wait(s)
-                try:
-                    await self.bot.client.edit_message(s.owner, old_mid, '已收到输入，请使用下方确认卡片。', buttons=None)
-                except Exception:
-                    logger.debug('旧面板未能更新，其按钮已失效', exc_info=True)
                 return
         await self._screen(s, text, rows)
         self._arm_wait(s)
@@ -498,25 +516,19 @@ class AdminPanel:
             await self._result(s, text)
         except Exception:
             logger.warning('确认结果未能写入面板，改发新面板', exc_info=True)
-            msg = await self.bot.client.send_message(s.owner, self._fit(text), buttons=self._keyboard(s, [BACK]),
-                                                     parse_mode=None, link_preview=False)
-            self._retire(s)
-            s.mid, s.card = msg.id, msg
+            await self._screen(s, text, [BACK], replace=True)
 
     async def _input_result(self, s, event, text, *, link_preview=False, receipt_kind='error'):
         try:
-            receipt = await event.respond(self._fit(text), reply_to=event.message.id, parse_mode=None, link_preview=link_preview)
+            receipt = await event.respond(self._fit(text), reply_to=event.message.id,
+                                          buttons=self._keyboard(s, [BACK]), parse_mode=None, link_preview=link_preview)
         except Exception:
-            logger.warning('输入回执发送失败，尝试更新原面板', exc_info=True)
+            logger.warning('输入回执发送失败，尝试单独发送结果', exc_info=True)
             await self._result(s, text)
             return
+        s.command, s.stage, s.expires = (), '', 0
+        await self._activate(s, receipt.id, 'receipt')
         self.bot.schedule_panel_receipt(receipt, receipt_kind)
-        try:
-            await self._result(s, '处理结果见本次输入下方的回复。')
-        except Exception:
-            self.sessions.pop(s.owner, None)
-            self._retire(s)
-            logger.exception('输入回执已发送，但面板更新失败')
 
     async def _execute(self, s, event, cmd, guard, result):
         if not cmd or not self.allowed(s.owner) or self._snapshot(cmd) != guard:

@@ -1986,7 +1986,9 @@ class TelegramBot:
         self._admission_failures = deque(maxlen=20)
         self._admission_failure_count = 0
         self.task_queue = TaskQueue(self)
-        self.admin_panel = AdminPanel(self, allowed=lambda uid: not self._stopping and uid in ADMIN_IDS,
+        bot_id = BOT_TOKEN.partition(':')[0]
+        self.admin_panel = AdminPanel(self, bot_id=int(bot_id) if bot_id.isdecimal() else 0,
+                                      allowed=lambda uid: not self._stopping and uid in ADMIN_IDS,
                                       home=START_MESSAGE_ADMIN, guide=HELP_MESSAGE_ADMIN,
                                       source_id=parse_monitor_chat_id, post_link=parse_private_channel_link,
                                       export_range=parse_export_range_args)
@@ -3226,7 +3228,7 @@ class TelegramBot:
             elif len(parts) > 2 or (len(parts) == 2 and not re.fullmatch(r'[1-9][0-9]{0,8}', parts[1])):
                 await respond('用法：/mappings [页码]')
             else:
-                await self.admin_panel.open(event.sender_id, respond, mappings=int(parts[1]) if len(parts) == 2 else 1)
+                await self.admin_panel.open(event.sender_id, event.respond, mappings=int(parts[1]) if len(parts) == 2 else 1)
             return True
 
         if command == '/flog':
@@ -3250,7 +3252,7 @@ class TelegramBot:
                 await respond('用法：/flog [页码] · /flog id <记录号> [详情页码] · /flog clear')
                 return True
             if event.sender_id == getattr(event, 'chat_id', None):
-                await self.admin_panel.open(event.sender_id, respond, history=action)
+                await self.admin_panel.open(event.sender_id, event.respond, history=action)
             else:
                 text, _ = self.admin_panel.history_view(PanelSession(event.sender_id), action)
                 await respond(text, parse_mode='html', link_preview=False)

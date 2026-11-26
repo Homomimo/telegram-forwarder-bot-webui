@@ -29,6 +29,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.messages = {}
         self.client.send_message.side_effect = self.send
         self.client.edit_message.side_effect = self.edit
+        self.client.delete_messages = AsyncMock(side_effect=self.delete_messages)
         self.bot.task_queue.start = AsyncMock()  # keep admitted tasks available for inspection
         await self.bot.start()
         self.new, self.cb = (self.client.handlers[k] for k in (events.NewMessage, events.CallbackQuery))
@@ -47,6 +48,11 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.chat_id, chat)
         msg.raw_text, msg.buttons = text, kw.get('buttons')
         return msg
+
+    def delete_messages(self, chat, mids):
+        for mid in mids:
+            self.assertEqual(self.messages[mid].chat_id, chat)
+            del self.messages[mid]
 
     @property
     def session(self):
@@ -86,21 +92,68 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
     async def reply(self, text):
         return await self.text(text, reply=self.session.prompt_id)
 
-    async def test_cancel_ack_failure_revokes_prompt_before_network_io(self):
+    async def test_sync_replaces_home_with_one_prompt_and_cancel_retires_it(self):
+        home = self.page
         await self.click('🔄 手动同步')
         prompt = self.session.prompt_id
-        async def broken_ack(*args):
-            self.assertEqual(self.session.prompt_id, 0)
-            raise ConnectionError('ack failed')
-        ev = NS(data=self.button('取消并返回'), sender_id=UID, chat_id=UID, message_id=self.session.mid,
-                answer=broken_ack)
-        with self.assertLogs('admin_panel', 'ERROR'):
-            await self.cb(ev)
-        self.assertNotIn(UID, self.bot.admin_panel.sessions)
+        self.assertEqual(list(self.messages), [prompt])
+        self.client.delete_messages.assert_awaited_once_with(UID, [home.id])
+        self.client.edit_message.assert_not_awaited()
+        self.assert_input_receipt(await self.reply('取消'), '已取消')
+        self.assertEqual(self.session.prompt_id, 0)
+        receipt = self.page
+        await self.click('⬅️ 返回面板')
+        self.assertNotIn(receipt.id, self.messages)
+        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
         old = await self.text(f'https://t.me/c/{SOURCE}/42', reply=prompt)
         self.assertIn('已失效', old.respond.await_args.args[0])
         self.bot.do_forward.assert_not_awaited()
         self.assertTrue(self.bot.task_queue.queue.empty())
+
+    async def test_prompt_failure_preserves_old_panel(self):
+        root = self.page
+        with patch.object(self.client, 'send_message', side_effect=ConnectionError('prompt unavailable')):
+            with self.assertLogs('admin_panel', 'ERROR'):
+                await self.click('🔄 手动同步')
+        self.client.delete_messages.assert_not_awaited()
+        self.assertIn(root.id, self.messages)
+        await self.click('🔄 手动同步')
+        self.assertEqual(list(self.messages), [self.session.prompt_id])
+
+    async def test_delete_failure_disables_previous_panel_buttons(self):
+        replacement = self.page
+        with patch.object(self.client, 'delete_messages', side_effect=ConnectionError('delete unavailable')):
+            with self.assertLogs('admin_panel', 'WARNING'):
+                await self.click('🔄 手动同步')
+        self.assertIsNone(replacement.buttons)
+        self.assertEqual(replacement.raw_text, '请使用最新的机器人消息。')
+        self.assert_input_receipt(await self.reply('取消'), '已取消')
+
+    async def test_replacement_is_durable_before_the_previous_panel_is_deleted(self):
+        home = self.page
+        panel = self.bot.admin_panel
+
+        def delete(chat, mids):
+            current = panel.journal.reusable_panel(panel.bot_id, UID)
+            self.assertEqual(current, self.session.mid)
+            self.assertNotIn(current, mids)
+            self.assertIn(current, self.messages)
+            self.delete_messages(chat, mids)
+
+        with patch.object(self.client, 'delete_messages', side_effect=delete):
+            await self.click('🎯 目标频道')
+        self.assertNotIn(home.id, self.messages)
+        self.assertEqual(list(self.messages), [self.page.id])
+
+    async def test_failed_persistence_retracts_the_new_prompt_and_keeps_old_buttons(self):
+        home = self.page
+        with patch.object(self.bot.admin_panel.journal, 'activate_panel', side_effect=OSError('disk full')):
+            with self.assertLogs('admin_panel', 'ERROR'):
+                await self.click('🔄 手动同步')
+        self.assertIs(self.page, home)
+        self.assertEqual([m.id for m in self.messages.values() if m.buttons], [home.id])
+        await self.click('🎯 目标频道')
+        self.assertNotIn(home.id, self.messages)
 
     async def test_flog_pages_keep_position_as_records_arrive_expire_or_clear(self):
         rows = [dict(id=str(i), date='date', to=TARGET, success=True, **{'from': 'link'}) for i in range(1, 13)]
@@ -189,7 +242,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
                     await self.click('🔄 刷新')
                     self.assertIn(expected, self.page.raw_text)
                 await self.click('⬅️ 返回面板')
-        self.client.send_message.assert_awaited_once()  # navigation edited the original
+        self.assertEqual(self.client.send_message.await_count, 2)  # startup and replacement target page
         group = await self.text('/start', chat=-90)
         self.assertNotIn('buttons', group.respond.await_args.kwargs)
         user = await self.text('/start', uid=71, chat=71)
@@ -219,6 +272,46 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
             event = await self.text('/start')
         event.respond.assert_awaited_once()
         self.assertNotEqual(self.session.mid, old_mid)
+        self.assertNotIn(old_mid, self.messages)
+        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+
+    async def test_all_panel_commands_keep_one_message_per_admin(self):
+        self.bot.forward_log.get_all.return_value = []
+        with patch.object(app, 'ADMIN_IDS', [UID, 72]), patch.object(self.bot, 'schedule_command_delete') as cleanup:
+            await self.text('/help', uid=72, chat=72)
+            other = self.bot.admin_panel.sessions[72].mid
+            for command in ('/help', '/start', '/flog', '/mappings', '/start'):
+                await self.text(command)
+                self.assertEqual(set(self.messages), {other, self.page.id})
+            await self.click('🔄 手动同步')
+            await asyncio.gather(self.text('/help'), self.text('/start'))
+            self.assertEqual(set(self.messages), {other, self.page.id})
+            self.assertEqual(self.messages[other].raw_text, app.HELP_MESSAGE_ADMIN)
+            cleanup.assert_not_called()
+
+    async def test_restart_reuses_page_and_recovers_interrupted_prompt_cleanup(self):
+        async def restart():
+            await self.bot.stop()
+            with patch.object(app, 'TelegramClient', return_value=self.client):
+                self.bot = app.TelegramBot()
+            self.bot.target_chat_id = TARGET
+            self.bot.task_queue.start = AsyncMock()
+            self.addAsyncCleanup(self.bot.stop)
+            await self.bot.start()
+            self.new, self.cb = (self.client.handlers[k] for k in (events.NewMessage, events.CallbackQuery))
+
+        original = self.page.id
+        key = self.button('🎯 目标频道')
+        await restart()
+        self.assertEqual(list(self.messages), [original])
+        self.assertTrue((await self.hit(key)).answer.await_args.kwargs['alert'])
+        with patch.object(self.client, 'delete_messages', side_effect=ConnectionError('offline')), self.assertLogs('admin_panel', 'WARNING'):
+            await self.click('🔄 手动同步')
+        prompt = self.session.prompt_id
+        self.assertEqual(set(self.messages), {original, prompt})
+        await restart()
+        self.assertEqual(list(self.messages), [self.page.id])
+        self.assertNotIn(self.page.id, (original, prompt))
         self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
 
     async def test_button_owner_generation_and_message_binding(self):
@@ -242,13 +335,12 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stale.answer.await_args.kwargs['alert'])
         self.client.edit_message.assert_not_awaited()
 
-    def assert_input_receipt(self, event, expected, *, confirmation=False):
+    def assert_input_receipt(self, event, expected):
         event.respond.assert_awaited_once()
         call = event.respond.await_args
         self.assertEqual(call.kwargs['reply_to'], event.message.id)
         self.assertIn(expected, call.args[0])
-        panel_text = call.args[0] if confirmation else '处理结果见本次输入下方的回复。'
-        self.assertEqual(self.page.raw_text, panel_text)
+        self.assertEqual(self.page.raw_text, call.args[0])
 
     async def test_replayed_commands_and_plain_submissions_are_only_handled_once(self):
         query = await self.text('/showto')
@@ -320,18 +412,15 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
                 self.assert_input_receipt(await self.reply(f'https://t.me/c/{SOURCE}/7'), expected)
                 enqueue.assert_awaited_once()
 
-    async def test_sync_panel_edit_failure_keeps_receipt_and_does_not_replay(self):
+    async def test_sync_receipt_needs_no_panel_edit_and_does_not_replay(self):
         link = f'https://t.me/c/{SOURCE}/7'
         self.bot.monitor_message_map().remember(SOURCE, TARGET, {7: 91})
         await self.click('🔄 手动同步')
         prompt = self.session.prompt_id
         self.client.edit_message.side_effect = ConnectionError('old panel deleted')
-        with self.assertLogs('admin_panel', 'ERROR'):
-            ev = await self.text(link, reply=prompt)
-        ev.respond.assert_awaited_once()
-        self.assertIn('任务已入队，尚未完成同步。', ev.respond.await_args.args[0])
-        self.assertEqual(ev.respond.await_args.kwargs['reply_to'], ev.message.id)
-        self.assertNotIn(UID, self.bot.admin_panel.sessions)
+        ev = await self.text(link, reply=prompt)
+        self.assert_input_receipt(ev, '任务已入队，尚未完成同步。')
+        self.client.edit_message.assert_not_awaited()
         with patch.object(self.bot.task_queue, 'enqueue_edit', new_callable=AsyncMock) as enqueue:
             stale = await self.text(link, reply=prompt)
             self.assertIn('已失效', stale.respond.await_args.args[0])
@@ -356,7 +445,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
                 await self.text('/start'); await self.click('🔄 手动同步')
                 mid = self.session.prompt_id
                 if reason == 'cancel':
-                    await self.click('取消并返回')
+                    await self.reply('取消')
                 elif reason == 'expired':
                     self.session.expires = 1
                 elif reason == 'restart':
@@ -381,7 +470,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.send_message.await_args.kwargs['reply_to'], first.message.id)
         self.assertIn('尚未入队', self.messages[self.session.prompt_id].raw_text)
         last = await self.reply(f'https://t.me/c/{SOURCE}/110')
-        self.assert_input_receipt(last, '待确认', confirmation=True)
+        self.assert_input_receipt(last, '待确认')
         for detail in (str(SOURCE), str(TARGET), '100 至 110'):
             self.assertIn(detail, self.page.raw_text)
         self.assertTrue(self.bot.task_queue.queue.empty())
@@ -415,12 +504,19 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
                 self.bot.do_forward.assert_not_awaited()
 
     async def test_target_and_monitor_changes_preview_and_share_command_state(self):
-        await self.click('🎯 目标频道'); await self.click('✏️ 更换目标')
-        mid, old = self.session.mid, self.button('取消并返回')
+        home_mid = self.session.mid
+        await self.click('🎯 目标频道')
+        mid, old = self.session.mid, self.button('✏️ 更换目标')
+        self.assertNotEqual(home_mid, mid)
+        self.assertNotIn(home_mid, self.messages)
+        await self.click('🔄 刷新')
+        self.assertEqual(self.session.mid, mid)
+        old = self.button('✏️ 更换目标')
+        await self.click('✏️ 更换目标')
+        self.assertNotIn(mid, self.messages)
         preview = await self.reply(str(TARGET+1))
-        self.assert_input_receipt(preview, f'{TARGET} → {TARGET+1}', confirmation=True)
+        self.assert_input_receipt(preview, f'{TARGET} → {TARGET+1}')
         self.assertNotEqual(mid, self.session.mid)
-        self.assertIsNone(self.messages[mid].buttons)
         self.assertTrue((await self.hit(old, mid=mid)).answer.await_args.kwargs['alert'])
         self.assertEqual(self.bot.target_chat_id, TARGET)
         clicked = await self.click('确认执行')
@@ -431,7 +527,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assert_input_receipt(await self.reply('12345'), '已添加自动监听源频道：12345')
         self.assertIn(12345, self.bot.monitor_chat_ids)
         await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('替换整个列表')
-        self.assert_input_receipt(await self.reply('123，456,123'), '123, 456', confirmation=True)
+        self.assert_input_receipt(await self.reply('123，456,123'), '123, 456')
         self.assertNotIn(456, self.bot.monitor_chat_ids)
         await self.click('确认执行'); self.assertEqual(self.bot.monitor_chat_ids, [123,456])
         await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('➖ 点选移除')
@@ -543,12 +639,14 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.bot.monitor_chat_ids, [SOURCE])
                 self.bot.do_forward.assert_not_awaited()
 
-    async def test_confirmation_send_failure_keeps_original_panel_actionable(self):
-        await self.click('🎯 目标频道'); await self.click('✏️ 更换目标')
+    async def test_confirmation_reply_failure_sends_an_actionable_confirmation_panel(self):
+        await self.click('🎯 目标频道')
         old_mid = self.session.mid
+        await self.click('✏️ 更换目标')
         with patch.object(self, 'send', side_effect=ConnectionError('receipt failed')), self.assertLogs('admin_panel', 'WARNING'):
             await self.reply(str(TARGET+1))
-        self.assertEqual(self.session.mid, old_mid)
+        self.assertNotIn(old_mid, self.messages)
+        self.assertNotEqual(self.session.mid, old_mid)
         self.assertIn('尚未执行', self.page.raw_text)
         self.assertEqual(self.bot.target_chat_id, TARGET)
         await self.click('确认执行')
@@ -580,64 +678,52 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.bot.do_forward.assert_awaited_once()
         self.assert_input_receipt(await self.reply('12345'), '已添加')
 
-    async def test_prompt_expiry_deletes_only_the_prompt_and_keeps_panel(self):
+    async def test_prompt_expiry_deletes_prompt_and_sends_an_expiry_panel(self):
         root = self.page
         with patch('admin_panel.TTL', 0.02):
             await self.click('📦 批量转发')
             prompt = self.session.prompt
             await asyncio.wait_for(self.session.timer, 2)
-        prompt.delete.assert_awaited_once_with()
-        root.delete.assert_not_awaited()
-        self.assertIs(root, self.page)
+        self.assertNotIn(prompt.id, self.messages)
+        self.assertNotIn(root.id, self.messages)
+        self.assertNotEqual(prompt.id, self.page.id)
         self.assertIn('过期', self.page.raw_text)
         self.assertEqual(self.session.prompt_id, 0)
         self.assertTrue(self.button('⬅️ 返回面板'))
         self.assertTrue(self.bot.task_queue.queue.empty())
 
-    async def test_confirmation_timeout_restores_root_before_deleting_card(self):
+    async def test_confirmation_timeout_updates_current_card_after_old_panel_was_deleted(self):
         root = self.page
         await self.click('🎯 目标频道'); await self.click('✏️ 更换目标')
         with patch('admin_panel.TTL', 0.02):
             await self.reply(str(TARGET+1))
             card, confirm = self.page, self.button('确认执行')
             await asyncio.wait_for(self.session.timer, 2)
-        self.assertIs(root, self.page)
-        card.delete.assert_awaited_once_with()
-        root.delete.assert_not_awaited()
+        self.assertNotIn(root.id, self.messages)
+        self.assertIs(card, self.page)
+        card.delete.assert_not_awaited()
+        self.assertIn('过期', self.page.raw_text)
         self.assertTrue((await self.hit(confirm, mid=card.id)).answer.await_args.kwargs['alert'])
         self.assertEqual(self.bot.target_chat_id, TARGET)
 
-    async def test_confirmation_timeout_without_root_keeps_current_card(self):
-        root = self.page
-        await self.click('🎯 目标频道'); await self.click('✏️ 更换目标')
-        with patch('admin_panel.TTL', 0.02):
-            await self.reply(str(TARGET+1))
-            card = self.page
-            del self.messages[root.id]
-            await asyncio.wait_for(self.session.timer, 2)
-        self.assertIs(card, self.page)
-        card.delete.assert_not_awaited()
-        self.assertIn('过期', card.raw_text)
         self.assertTrue(self.button('⬅️ 返回面板'))
 
     async def test_used_prompt_and_retired_card_cleanup_never_targets_active_panel(self):
-        root = self.page
         with patch.object(self.bot, 'schedule_delete', wraps=self.bot.schedule_delete) as schedule:
             await self.click('🎯 目标频道'); await self.click('✏️ 更换目标')
             prompt = self.session.prompt
             first_timer = self.session.timer
             await self.reply(str(TARGET+1))
-            schedule.assert_called_once_with(prompt, 30)
+            self.assertNotIn(prompt.id, self.messages)
             card, wait = self.page, self.session.timer
             await self.click('确认执行')
             await asyncio.sleep(0)
             self.assertTrue(first_timer.cancelled() and wait.cancelled())
             self.assertIs(card, self.page)
-            schedule.assert_called_once_with(prompt, 30)
             await self.text('/help')
-            schedule.assert_called_with(card, app.AUTO_DELETE_COMMAND_SECONDS)
-            self.assertNotIn(root.id, [call.args[0].id for call in schedule.call_args_list])
-            self.assertNotIn(self.page.id, [call.args[0].id for call in schedule.call_args_list])
+            self.assertEqual(list(self.messages), [card.id])
+            self.assertEqual(card.raw_text, app.HELP_MESSAGE_ADMIN)
+            schedule.assert_not_called()
 
     async def test_receipt_retention_by_outcome_and_sync_override(self):
         self.bot.monitor_message_map().remember(SOURCE, TARGET, {7: 91})
@@ -656,7 +742,8 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
                     receipt, actual_delay = schedule.call_args.args
                     self.assertEqual(actual_delay, delay)
                     self.assertEqual(receipt.raw_text, ev.respond.await_args.args[0])
-                    self.assertNotIn(receipt.id, (ev.message.id, self.page.id))
+                    self.assertIs(receipt, self.page)
+                    self.assertNotEqual(receipt.id, ev.message.id)
 
     async def test_cleanup_switch_off_preserves_expiry_checks_without_any_timers(self):
         with patch.object(app, 'AUTO_DELETE_BOT_MESSAGES', False):

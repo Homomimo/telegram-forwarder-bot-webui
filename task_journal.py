@@ -25,11 +25,30 @@ class TaskJournal:
                            'state TEXT NOT NULL, payload TEXT NOT NULL)')
                 db.execute('CREATE TABLE IF NOT EXISTS manual_members(job INTEGER, source INTEGER, result INTEGER, '
                            'PRIMARY KEY(job,source))')
+                db.execute('CREATE TABLE IF NOT EXISTS admin_panels(bot INTEGER, owner INTEGER, mid INTEGER, '
+                           'kind TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(bot,owner,mid))')
             except sqlite3.Error:
                 db.close()
                 raise
             self.db = db
         return self.db
+
+    def reusable_panel(self, bot, owner):
+        row = self.open().execute("SELECT mid FROM admin_panels WHERE bot=? AND owner=? AND active=1 "
+                                  "AND kind='panel'", (bot, owner)).fetchone()
+        return row[0] if row else 0
+
+    def activate_panel(self, bot, owner, mid, kind):
+        # Commit the new pointer and the outstanding deletions before contacting Telegram again.
+        with self.open() as db:
+            db.execute('UPDATE admin_panels SET active=0 WHERE bot=? AND owner=? AND active=1', (bot, owner))
+            db.execute('INSERT OR REPLACE INTO admin_panels VALUES(?,?,?,?,1)', (bot, owner, mid, kind))
+            return db.execute('SELECT mid,kind FROM admin_panels WHERE bot=? AND owner=? AND active=0',
+                              (bot, owner)).fetchall()
+
+    def forget_retired_panel(self, bot, owner, mid):
+        with self.open() as db:
+            db.execute('DELETE FROM admin_panels WHERE bot=? AND owner=? AND mid=? AND active=0', (bot, owner, mid))
 
     def restore(self):
         with self.open() as db:
