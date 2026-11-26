@@ -306,7 +306,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await self.click('⬅️ 返回面板')
         await self.click('📡 监听频道')
         await self.click('🔀 频道配对')
-        await self.click('启用严格一对一…')
+        await self.click('启用严格一对一')
         await self.click('确认执行')
         self.assertEqual(self.bot.automatic_target(SOURCE), destination)
         await self.click('⬅️ 返回面板')

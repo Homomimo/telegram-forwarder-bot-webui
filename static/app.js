@@ -222,7 +222,7 @@ function draw() {
       ? `<p class="hint">尚未启用配对的现有监听源：${missing.map((id) => esc(channelLabel(id))).join("、")}</p>` : "";
     let modeAction = "";
     if (strict) modeAction = btn("deactivatePairs", "关闭严格一对一…");
-    else if (!missing.length && rows.some((row) => row.enabled)) modeAction = btn("activatePairs", "启用严格一对一…");
+    else if (!missing.length && rows.some((row) => row.enabled)) modeAction = btn("activatePairs", "启用严格一对一");
     body += card(status, waiting + table(["源频道", "目标频道", "状态", "操作"], rows.map((row) =>
       `<tr><td>${esc(channelLabel(row.source))}</td><td>${esc(channelLabel(row.target))}</td><td>${row.enabled ? "启用" : "暂停"}</td><td><div class="actions">${btn("editPair", "更改目标", "", row.source)}${btn("togglePair", row.enabled ? "暂停" : "恢复", "", row.source)}${btn("deletePair", "删除", "", row.source)}</div></td></tr>`
     ), "尚未配置频道配对。"), `<div class="actions">${btn("addPair", "新增配对")}${modeAction}</div>`);

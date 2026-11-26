@@ -475,7 +475,7 @@ class AdminPanel:
             if state['strict']:
                 rows.append([('关闭严格一对一…', 'pair:deactivate')])
             elif not state['missing'] and any(row['enabled'] for row in state['rows']):
-                rows.append([('启用严格一对一…', 'pair:activate')])
+                rows.append([('启用严格一对一', 'pair:activate')])
             s.pair_revision = state['revision']
             await self._screen(s, '\n\n'.join(lines), [*rows, [('⬅️ 返回监听', 'monitor'), *BACK]])
             return
