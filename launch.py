@@ -22,7 +22,7 @@ def prepare_data():
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
     legacy = data / "live"
     if legacy.exists() or legacy.is_symlink():
-        raise SystemExit("发现旧数据目录 /data/live。请按 README 使用 VPS 更新脚本迁移，未启动服务。")
+        raise SystemExit("发现旧数据目录 /data/live。请先迁移数据到 /data，未启动服务。")
     # The bind mount itself now stores private data. Restrict it before dropping privileges.
     if sys.platform == "linux" and os.getuid() == 0 and data == Path("/data"):
         data.chmod(0o700)
