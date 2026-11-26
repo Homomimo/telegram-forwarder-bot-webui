@@ -402,10 +402,13 @@ class TaskQueue:
             task.store_retries += 1
         else:
             task.retries += 1
-        task.ready_at = time.time() + delay
+        self.defer_until(task, time.time() + delay)
+
+    def defer_until(self, task: ForwardTask, ready_at: float) -> None:
+        task.ready_at = ready_at
         state = 'retry_rejected' if task.rejected_copy is not None else 'sending' if task.send_started else 'pending'
         self.journal.save(task, state)
-        self._schedule_retry(task, delay)
+        self._schedule_retry(task, max(0, ready_at - time.time()))
 
     def defer_album(self, task, exc):
         if task.retries < 2:
@@ -1940,6 +1943,7 @@ class TelegramBot:
         self.forward_log = ForwardLog()
         self._pending_albums: set[tuple[int, int]] = set()
         self._album_processed: dict[tuple[int, int], None] = {}
+        self._album_read_ready_at: dict[str, float] = {}
         self._forward_status_ids: dict[tuple[int, int], None] = {}
         self._stopping = False
         self._delete_tasks: set[asyncio.Task] = set()
@@ -2597,7 +2601,17 @@ class TelegramBot:
                             snapshot = task.album_event_ids
                             if not snapshot or not set(message_ids).issubset(snapshot):
                                 raise AlbumNotReady('等待包含全部已观察成员的相册事件')
-                            posts = await read_members(client, source_peer, snapshot, task.grouped_id)
+                            role = 'bot' if client is self.client else 'user'
+                            ready_at = self._album_read_ready_at.get(role, 0)
+                            if ready_at > time.time():
+                                self.task_queue.defer_until(task, ready_at)
+                                return
+                            try:
+                                posts = await read_members(client, source_peer, snapshot, task.grouped_id)
+                            except errors.FloodWaitError as exc:
+                                # Other albums on this account use the same source-read RPC.
+                                self._album_read_ready_at[role] = time.time() + max(1, exc.seconds)
+                                raise
                             if [p.id for p in posts] != snapshot:
                                 raise AlbumNotReady('相册事件与源频道回读结果不同')
                             task.message_ids = message_ids = snapshot

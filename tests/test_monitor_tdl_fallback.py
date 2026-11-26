@@ -100,6 +100,38 @@ class RestrictedCloneTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTest
         timer.cancel()
         q.queue.put_nowait(task)
 
+    async def test_album_read_flood_defers_other_albums_without_using_their_retry(self):
+        self.posts = {mid: photo(mid, group) for group, ids in [(99, [103, 107]), (100, [113, 117])]
+                      for mid in ids}
+        client = self.bot.client
+        request = app.functions.channels.GetMessagesRequest(T.InputChannel(SOURCE, 20), [103, 107])
+        client.get_messages.side_effect = app.errors.FloodWaitError(request, capture=31)
+        await self.enqueue(self.event(103, 107, album=99))
+        await self.enqueue(self.event(113, 117, album=100))
+        await self.enqueue(self.event(121))
+
+        now = app.time.time()
+        with patch.object(app.time, 'time', return_value=now):
+            first = await self.process()
+            second = await self.process()
+            single = await self.process()
+        self.assertEqual((first.status, first.ready_at, first.retries), (app.TaskStatus.PENDING, now + 31, 1))
+        self.assertEqual((second.status, second.ready_at, second.retries), (app.TaskStatus.PENDING, now + 31, 0))
+        self.assertEqual(single.status, app.TaskStatus.COMPLETED)
+        client.get_messages.assert_awaited_once()
+        self.assertEqual(client.forward.await_args.args[0].id, [121])
+        self.assertEqual({row[0]: (row[1], row[2]['ready_at']) for row in self.bot.task_queue.journal.restore()},
+                         {first.job_id: ('pending', now + 31), second.job_id: ('pending', now + 31)})
+
+        client.get_messages.side_effect = self.read
+        with patch.object(app.time, 'time', return_value=now + 31):
+            self.advance_retry()
+            self.advance_retry()
+            for _ in range(2):
+                self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        self.assertEqual({tuple(call.args[0].id) for call in client.forward.await_args_list},
+                         {(121,), (103, 107), (113, 117)})
+
     async def test_flood_on_first_fallback_read_honors_deadline_across_restart(self):
         self.restrict(photo(5))
         self.bot.report_monitor_status = AsyncMock()
