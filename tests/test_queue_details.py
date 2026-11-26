@@ -85,6 +85,7 @@ class QueueDetailsTests(MonitorHarness, unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_and_fifo_details(self):
         q = self.queue
+        self.bot.channel_names.update({SOURCE: '素材库', TARGET: '归档频道'})
         for mid in (20, 1, 5):
             await self.admit(mid, link=f'https://t.me/c/{SOURCE}/{mid}?single')
         first, second, third = [item['job_id'] for item in q.snapshot()['queued']]
@@ -101,7 +102,8 @@ class QueueDetailsTests(MonitorHarness, unittest.IsolatedAsyncioTestCase):
             q.current_task.started_at -= 72
             text = await self.command('/queue')
         self.assertIn(f'正在处理 #{first} 手动转发 · 已运行 1分12秒', text)
-        self.assertIn(f'目标：{TARGET} · 消息数：1 条', text)
+        self.assertIn(f'源：素材库（{SOURCE}）', text)
+        self.assertIn(f'目标：归档频道（{TARGET}） · 消息数：1 条', text)
         self.assertEqual(re.findall(r'^\d+\. #(\d+) 手动转发', text, re.M), [str(second), str(third)])
         self.assertIn('共 2 项：排队 2', text)
         self.assertNotIn('定时重试：', text)

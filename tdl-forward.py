@@ -994,6 +994,8 @@ class TaskQueue:
             link = (post_url(task.source_chat_id, bounds[0]) if bounds else None) or task.link
             # Deliberate allowlist; Task objects can also contain clients, events and live requests.
             return dict(job_id=task.job_id, mode=task.mode, link=link, target_chat_id=task.target_chat_id,
+                        source_label=self.bot.source_channel_label(task.link, task.source_chat_id),
+                        target_label=self.bot.channel_label(task.target_chat_id),
                         count=count, range=bounds, age=max(0, int(now - task.created_at)) if task.created_at else 0,
                         retries=task.retries, store_retries=task.store_retries,
                         ready_in=max(0, math.ceil(ready_at - monotonic_now)) if ready_at is not None else 0,
@@ -1951,6 +1953,7 @@ class TelegramBot:
         self.monitor_chat_ids: list[int] = MONITOR_CHAT_IDS.copy()
         self.channel_pairs: dict[int, tuple[int, bool, int]] = {}  # source -> (target, enabled, since)
         self.strict_pairs = False
+        self.legacy_resumed_at = 0
         self.pairing_revision = 0
         self.channel_names: dict[int, str] = {}  # Bare ID, shared across roles.
         self.forward_log = ForwardLog()
@@ -2060,22 +2063,41 @@ class TelegramBot:
             ids[cid] = None
         return list(ids), titles
 
-    def channel_label(self, chat_id: int) -> str:
-        name = self.channel_names.get(self.normalize_source_chat_id(chat_id))
-        return f'{name}（{chat_id}）' if name else str(chat_id)
+    def channel_label(self, chat_id: int | None, *, name_limit=None) -> str:
+        if not chat_id:
+            return '未设置'
+        channel = numeric_channel(str(chat_id))
+        name = self.channel_names.get(channel)
+        if name and name_limit is not None and len(name) > name_limit:
+            name = name[:name_limit - 1] + '…'
+        display_id = channel if channel is not None else chat_id
+        return f'{name}（{display_id}）' if name else str(display_id)
+
+    def source_channel_label(self, link: str, source=None) -> str:
+        if source:
+            return self.channel_label(source)
+        if link.startswith('chat_id:'):
+            source = numeric_channel(link.removeprefix('chat_id:'))
+            if source:
+                return self.channel_label(source)
+        link_source, post = self.tdl.parse_message_link(link)
+        if link_source:
+            return self.channel_label(link_source)
+        if post:
+            # Older records and pending public links can have a handle but no known numeric ID.
+            return '@' + link.strip().split('/')[3]
+        return '未识别频道'
+
+    def history_channel_labels(self, row):
+        return dict(source_label=self.source_channel_label(row['from'], row.get('source_channel')),
+                    target_label=self.channel_label(row['to']))
 
     def transfer_context(self, link, target, *, source=None, first=None):
         """Format display text only. Use the task destination, never the current default."""
         link_source, post = self.tdl.parse_message_link(link)
         source = source or link_source
-        if source:
-            source_label = self.channel_label(self.normalize_source_chat_id(source))
-        elif post:
-            # A public post has a username before Telegram returns the numeric ID.
-            source_label = '@' + link.split('/')[3]
-        else:
-            source_label = '未识别频道'
-        target_label = self.channel_label(self.normalize_source_chat_id(target)) if target else '未设置'
+        source_label = self.source_channel_label(link, source)
+        target_label = self.channel_label(target)
         text = f'来源：{source_label}\n目标：{target_label}'
         # Numeric range submissions historically store chat_id:<id>, which is not a link.
         source_post = link if post else post_url(source, first)
@@ -2116,7 +2138,9 @@ class TelegramBot:
     def load_channel_pairs(self, saved):
         records = saved.get('pairs', [])
         strict = saved.get('strict_pairs', False)
-        if not isinstance(records, list) or type(strict) is not bool:
+        resumed_at = saved.get('legacy_resumed_at', 0)
+        if (not isinstance(records, list) or type(strict) is not bool
+                or type(resumed_at) is not int or resumed_at < 0):
             raise ValueError('频道配对配置无效，未覆盖原配置。')
         pairs = {}
         for row in records:
@@ -2129,6 +2153,7 @@ class TelegramBot:
             pairs[source] = (target, enabled, since)
         self.validate_channel_pairs(pairs, self.monitor_target_channel_id() if strict else None)
         self.channel_pairs, self.strict_pairs = pairs, strict
+        self.legacy_resumed_at = resumed_at
 
     def pairing_state(self):
         legacy = {self.normalize_source_chat_id(cid) for cid in self.monitor_chat_ids}
@@ -2137,7 +2162,7 @@ class TelegramBot:
                     rows=[dict(source=str(src), target=str(target), enabled=enabled)
                           for src, (target, enabled, _) in sorted(self.channel_pairs.items())])
 
-    def change_channel_pair(self, action, source=None, target=None, *, expected):
+    def change_channel_pair(self, action, source=None, target=None, *, expected, source_title='', target_title=''):
         if type(expected) is not int or expected != self.pairing_revision:
             raise ValueError('频道配置已改变，请刷新后重新确认。')
         pairs, strict = self.channel_pairs.copy(), self.strict_pairs
@@ -2149,6 +2174,10 @@ class TelegramBot:
                 raise ValueError('请先为所有现有监听源配置并启用配对。')
             pairs = {src: (dst, enabled, now) for src, (dst, enabled, _) in pairs.items()}
             strict = True
+        elif action == 'deactivate':
+            if not strict:
+                raise ValueError('严格一对一已关闭。')
+            strict = False
         elif action == 'add':
             if source in pairs:
                 raise ValueError('此源频道已有配对，请编辑原配对。')
@@ -2165,7 +2194,16 @@ class TelegramBot:
                 del pairs[source]
             else:
                 raise ValueError('无效的频道配对操作。')
-        self.update_channels(pairs=pairs, strict_pairs=strict)
+        names = {}
+        if action in ('add', 'edit'):
+            for cid, title in ((source, source_title), (target, target_title)):
+                if cid in self.channel_names or not title:
+                    continue
+                # Recognized titles are defaults. Normalize them to the existing remark format.
+                printable = ''.join(char if char.isprintable() else ' ' for char in title)
+                if name := ' '.join(printable.split())[:48].strip():
+                    names[cid] = name
+        self.update_channels(pairs=pairs, strict_pairs=strict, names=names)
 
     def update_channels(self, *, target=None, sources=None, names=None, pairs=None, strict_pairs=None):
         target = self.target_chat_id if target is None else target
@@ -2174,6 +2212,7 @@ class TelegramBot:
         sources = self.monitor_chat_ids if sources is None else sources
         pairs = self.channel_pairs if pairs is None else pairs
         strict = self.strict_pairs if strict_pairs is None else strict_pairs
+        resumed_at = int(time.time()) if self.strict_pairs and not strict else self.legacy_resumed_at
         default = self.normalize_source_chat_id(target) if target is not None else None
         self.validate_channel_pairs(pairs, default if strict else None)
         active = {self.normalize_source_chat_id(cid) for cid in sources}
@@ -2197,11 +2236,14 @@ class TelegramBot:
             if pairs or strict:
                 saved.update(strict_pairs=strict, pairs=[dict(source=src, target=dst, enabled=on, since=since)
                                                         for src, (dst, on, since) in sorted(pairs.items())])
+            if resumed_at:
+                saved['legacy_resumed_at'] = resumed_at
             accounts.private_write(self.console_data / 'channels.json', saved)
         if (target, sources, pairs, strict) != (self.target_chat_id, self.monitor_chat_ids, self.channel_pairs, self.strict_pairs):
             self.pairing_revision += 1
         self.target_chat_id, self.monitor_chat_ids, self.channel_names = target, sources, labels
         self.channel_pairs, self.strict_pairs = pairs, strict
+        self.legacy_resumed_at = resumed_at
 
     def format_monitor_chat_ids(self) -> str:
         if self.strict_pairs:
@@ -2343,8 +2385,8 @@ class TelegramBot:
         # Only observed posts of this source may be forwarded, never inferred adjacent IDs.
         members = {m.id: m for m in messages if m.peer_id == message.peer_id and m.grouped_id == message.grouped_id}
         copy_allowed = not edited
-        if self.strict_pairs:
-            since = self.channel_pairs[source_id][2]
+        since = self.channel_pairs[source_id][2] if self.strict_pairs else self.legacy_resumed_at
+        if since:
             for mid, item in list(members.items()):
                 date = getattr(item, 'date', None)
                 if date is not None and date.timestamp() < since:
@@ -3286,16 +3328,17 @@ class TelegramBot:
                 if action == 'add':
                     added = self.add_monitor_chat_id(chat_id)
                     if added:
-                        await respond(f"✅ 已添加自动监听源频道：{chat_id}\n\n{self.format_monitor_chat_ids()}")
+                        await respond(f"✅ 已添加自动监听源频道：{self.channel_label(chat_id)}\n\n{self.format_monitor_chat_ids()}")
                     else:
-                        await respond(f"ℹ️ 该频道已在监听列表中：{chat_id}")
+                        await respond(f"ℹ️ 该频道已在监听列表中：{self.channel_label(chat_id)}")
                     return True
 
+                label = self.channel_label(chat_id)
                 removed = self.remove_monitor_chat_id(chat_id)
                 if removed:
-                    await respond(f"✅ 已删除自动监听源频道：{chat_id}\n\n{self.format_monitor_chat_ids()}")
+                    await respond(f"✅ 已删除自动监听源频道：{label}\n\n{self.format_monitor_chat_ids()}")
                 else:
-                    await respond(f"ℹ️ 该频道不在监听列表中：{chat_id}")
+                    await respond(f"ℹ️ 该频道不在监听列表中：{label}")
                 return True
 
             if action == 'set':
@@ -3440,7 +3483,10 @@ class TelegramBot:
                         except (sqlite3.Error, OSError):
                             logger.warning('无法读取待核对编辑的目标映射：任务 #%s', item['job_id'], exc_info=True)
                     source = queue_excerpt(item['link'])
-                    lines.append(f"#{item['job_id']} {item['mode']}：{source}{detail} → {target_post_ref(target, mapped, album_member=album_member)}\n")
+                    source_label = self.source_channel_label(item['link'], item.get('source_chat_id'))
+                    target_label = self.channel_label(target)
+                    target_ref = f' · {target_post_ref(target, mapped, album_member=album_member)}' if mapped else ''
+                    lines.append(f"#{item['job_id']} {item['mode']}：{source}{detail} · {source_label} → {target_label}{target_ref}\n")
                 if len(recent) > 5:
                     lines.append(f"下一页：/queue {recent[4]['job_id']}\n")
                 lines.append('核对完成后：/queue done <任务ID> 或 /queue done all')
@@ -3686,7 +3732,7 @@ class TelegramBot:
             preview += f'，另有 {len(sources) - 8} 个'
         logger.info('[启动/配置] 目标频道=%s；源频道 %d 个（%s）；管理员 %d 人；额外投稿名单 %d 人',
                     self.monitor_target_channel_id() or '未设置', len(sources), preview, len(ADMIN_IDS), len(SUBMITTER_IDS))
-        logger.info('[启动/配置] 自动复制路由：%s', '严格一对一' if self.strict_pairs else '旧版共享目标')
+        logger.info('[启动/配置] 自动复制路由：%s', '严格一对一' if self.strict_pairs else '默认共享目标')
         logger.info('[启动/配置] MONITOR_TDL_FALLBACK：%s；状态消息自动删除：%s',
                     '开启' if MONITOR_TDL_FALLBACK else '关闭',
                     (f'普通 {AUTO_DELETE_STATUS_SECONDS}s / 错误 {AUTO_DELETE_ERROR_SECONDS}s / 命令 {AUTO_DELETE_COMMAND_SECONDS}s'

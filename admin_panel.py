@@ -29,7 +29,7 @@ PAGES = {
     'queue': ('/queue', [[('⏹ 停止任务…', 'ask:stop'), ('✅ 清空待核对…', 'ask:reviewclear')]]),
 }
 QUESTIONS = {
-    'sync': '请回复这条提示，粘贴源频道原帖链接（如 https://t.me/c/1234567890/42）。机器人会回复是否已入队；只更新已映射的目标帖，不另发。',
+    'sync': '请粘贴源频道原帖链接（如 https://t.me/c/1234567890/42）。机器人会回复是否已入队。',
     'export': '第 1 步：请回复起始原帖的 t.me/c 消息链接。',
     'end': '已收到起始链接，尚未入队。第 2 步：请回复这条提示，粘贴同一源频道的结束原帖链接。',
     'target': '请回复目标频道的 ID、@用户名或 t.me 链接。',
@@ -57,6 +57,7 @@ class Session:
     history_ids: set | None = None
     result_receipt: bool = False  # Open a fresh home instead of reusing a receipt scheduled for cleanup.
     prompt: object = None
+    sync_controls_mid: int = 0
     timer: asyncio.Task | None = None
     stage: str = ''
     start_link: str = ''
@@ -65,6 +66,7 @@ class Session:
     expires: float = 0
     pair_revision: int = 0
     pair_source: int | None = None
+    pair_titles: tuple[str, str] = ('', '')
 
     @property
     def prompt_id(self):
@@ -145,10 +147,11 @@ class AdminPanel:
             if index is None:
                 text, buttons = '此记录不存在、已过期或已清除。', [[('⬅️ 返回记录', f'hpage:{origin}')]]
             else:
-                text, buttons = history_detail(rows[index], int(origin) or index // PAGE_SIZE + 1, int(part))
+                text, buttons = history_detail(rows[index], int(origin) or index // PAGE_SIZE + 1, int(part),
+                                               labels=self.bot.history_channel_labels)
         else:
             page = 1 if action == 'history' else int(action.partition(':')[2])
-            text, buttons = history_list(rows, page)
+            text, buttons = history_list(rows, page, labels=self.bot.history_channel_labels)
             buttons += [[('🔄 刷新', 'history'), ('🗑 清空本地记录…', 'ask:logclear')]]
         if self.bot.forward_log.write_failed is True:
             text += '\n⚠️ 历史文件写入失败，部分记录仅在内存中。'
@@ -163,7 +166,7 @@ class AdminPanel:
             links = []
             for side, label in (('source', '源帖'), ('target', '目标帖')):
                 message = row[f'{side}_message']
-                channel = escape(row[f'{side}_label'][:40])
+                channel = escape(row[f'{side}_label'])
                 url = row[f'{side}_url']
                 post = f'<a href="{url}">{label} #{message}</a>' if url else f'{label} #{message}'
                 links.append(f'{channel} {post}')
@@ -234,9 +237,9 @@ class AdminPanel:
         msg = await deliver(text, **options)
         await self._activate(s, msg.id, 'panel')
 
-    async def _activate(self, s, mid, kind, *, edited=False):
+    async def _activate(self, s, mid, kind, *, edited=False, controls_mid=0):
         try:
-            retired = self.journal.activate_panel(self.bot_id, s.owner, mid, kind)
+            retired = self.journal.activate_panel(self.bot_id, s.owner, mid, kind, controls_mid=controls_mid)
         except Exception:
             if not edited:
                 # The previous pointer is intact. Remove the untracked replacement if possible.
@@ -246,6 +249,7 @@ class AdminPanel:
                     logger.exception('持久化失败后未能撤回新面板')
             raise
         s.mid = 0 if kind == 'prompt' else mid
+        s.sync_controls_mid = controls_mid
         s.result_receipt = kind == 'receipt'
         previous = self.sessions.get(s.owner)
         if previous is not s and self.allowed(s.owner):
@@ -258,7 +262,7 @@ class AdminPanel:
             except Exception as exc:
                 logger.warning('未能删除旧面板，尝试移除旧按钮', exc_info=True)
                 # Keep a retired input recognizable if someone replies to it later.
-                notice = (PROMPT if old_kind == 'prompt' else '') + '请使用最新的机器人消息。'
+                notice = (PROMPT if old_kind in ('prompt', 'sync-controls') else '') + '请使用最新的机器人消息。'
                 try:
                     await self.bot.client.edit_message(s.owner, old_mid, notice, buttons=None)
                 except errors.MessageIdInvalidError:
@@ -281,12 +285,17 @@ class AdminPanel:
             s = self.sessions.get(uid)
             if not self.allowed(uid):
                 return
-            if not s or event.message_id != s.mid or event.data not in s.choices:
+            sync_prompt = bool(s and s.prompt_id and s.sync_controls_mid
+                               and event.message_id == s.sync_controls_mid)
+            if not s or (event.message_id != s.mid and not sync_prompt) or event.data not in s.choices:
                 await event.answer('按钮已失效，请使用最新面板或发送 /start。', alert=True)
                 if s and event.message_id != s.mid:
                     await self._remove_old_keyboard(event)
                 return
             action = s.choices[event.data]
+            if sync_prompt:
+                await self._exit_sync_prompt(s, event)
+                return
             if action == 'webui':
                 await self._send_webui_link(s, event)
                 return
@@ -322,6 +331,24 @@ class AdminPanel:
                         logger.warning('未能发送面板切换失败提示', exc_info=True)
                 else:
                     await self._unavailable(s)
+
+    async def _exit_sync_prompt(self, s, event):
+        choices = s.choices
+        await event.answer()
+        if not self.allowed(s.owner):
+            return
+        try:
+            await self._screen(s, *self.home_view())
+        except Exception:
+            if s.mid:
+                await self._unavailable(s)
+                return
+            s.choices = choices
+            logger.exception('无法从手动同步返回面板')
+            await self._error_notice(event.respond, '首页未能打开，请重试或发送 /start。')
+            return
+        self._end_wait(s)
+        s.stage, s.expires = '', 0
 
     async def _send_webui_link(self, s, event):
         if not self.webui_url:
@@ -425,7 +452,7 @@ class AdminPanel:
         back = [('⬅️ 返回配对', 'pairs:1')]
         if action.startswith('pairs:'):
             page = max(1, min(int(verb), (len(state['rows']) + 5) // 6))
-            mode = '严格一对一已启用' if state['strict'] else '准备切换 · 自动复制仍使用旧版目标'
+            mode = '严格一对一已启用' if state['strict'] else '准备切换 · 自动复制仍使用默认共享目标'
             lines = ['🔀 频道配对', mode]
             if not state['strict'] and state['missing']:
                 lines.append(f"还有 {len(state['missing'])} 个现有监听源需要启用配对。")
@@ -435,7 +462,8 @@ class AdminPanel:
             for row in state['rows'][(page - 1) * 6:page * 6]:
                 src, dst = int(row['source']), int(row['target'])
                 status = '启用' if row['enabled'] else '暂停'
-                rows.append([(f'{self.bot.channel_label(src)[:26]} → {self.bot.channel_label(dst)[:26]} · {status}', f'pair:view:{src}')])
+                route = f'{self.bot.channel_label(src, name_limit=16)} → {self.bot.channel_label(dst, name_limit=16)}'
+                rows.append([(f'{route} · {status}', f'pair:view:{src}')])
             nav = []
             if page > 1:
                 nav.append(('上一页', f'pairs:{page - 1}'))
@@ -444,7 +472,9 @@ class AdminPanel:
             if nav:
                 rows.append(nav)
             rows.append([('➕ 新增配对', 'pair:add')])
-            if not state['strict'] and not state['missing'] and any(row['enabled'] for row in state['rows']):
+            if state['strict']:
+                rows.append([('关闭严格一对一…', 'pair:deactivate')])
+            elif not state['missing'] and any(row['enabled'] for row in state['rows']):
                 rows.append([('启用严格一对一…', 'pair:activate')])
             s.pair_revision = state['revision']
             await self._screen(s, '\n\n'.join(lines), [*rows, [('⬅️ 返回监听', 'monitor'), *BACK]])
@@ -467,6 +497,20 @@ class AdminPanel:
             await self._prompt(s, f'pair-{verb}')
         elif verb == 'activate':
             await self._confirm(s, ('pairs', verb), '启用严格一对一自动复制。手动和批量转发继续使用默认目标，已入队任务保留原目标。')
+        elif verb == 'deactivate':
+            target = self.bot.monitor_target_channel_id()
+            sources = self.bot.monitor_chat_ids
+            labels = [self.bot.channel_label(cid) for cid in sources[:20]]
+            if len(sources) > len(labels):
+                labels.append(f'另有 {len(sources) - len(labels)} 个')
+            source_summary = '、'.join(labels) or '未设置'
+            detail = ('关闭严格一对一，恢复默认共享目标。\n'
+                      f'旧版监听源：{source_summary}\n'
+                      f'默认共享目标：{self.bot.channel_label(target) if target else "未设置"}。')
+            if not target or not any(self.bot.normalize_source_chat_id(cid) != target for cid in sources):
+                detail += '\n当前配置下，关闭后不会自动转发。'
+            detail += '\n已保存的配对、源帖映射和已入队任务会保留。'
+            await self._confirm(s, ('pairs', verb), detail)
         elif pair and verb in ('toggle', 'delete'):
             label = '暂停' if pair[1] else '恢复'
             if verb == 'delete':
@@ -485,14 +529,41 @@ class AdminPanel:
 
     async def _prompt(self, s, stage, *, reply_to=None):
         s.stage = stage
-        text = PROMPT + QUESTIONS[stage] + '\n5 分钟内有效；回复「取消」可退出。'
-        if stage == 'sync' and self.bot.strict_pairs:
-            text += '\n目标按源频道配对自动选择。'
-        elif stage in ('sync', 'export', 'end'):
-            text += f'\n当前目标：{s.guard}'
+        text = PROMPT + QUESTIONS[stage]
+        if stage == 'sync':
+            await self._sync_prompt(s, text)
+            return
+        text += '\n5 分钟内有效；回复「取消」可退出。'
+        if stage in ('export', 'end'):
+            text += f'\n当前目标：{self.bot.channel_label(s.guard)}'
         prompt = await self.bot.client.send_message(s.owner, text, buttons=Button.force_reply(single_use=True),
                                                     link_preview=False, reply_to=reply_to)
         await self._activate(s, prompt.id, 'prompt')
+        s.prompt = prompt
+        self._arm_wait(s)
+
+    async def _sync_prompt(self, s, text):
+        client = self.bot.client
+        target = ('目标按源频道配对自动选择。' if self.bot.strict_pairs
+                  else f'当前目标：{self.bot.channel_label(s.guard)}')
+        controls = await client.send_message(
+            s.owner, f'{PROMPT}🔄 手动同步\n\n只更新已映射的目标帖，不另发。输入 5 分钟内有效。\n{target}',
+            buttons=self._keyboard(s, [[('⬅️ 取消并返回', 'home')]]), parse_mode=None, link_preview=False,
+        )
+        try:
+            self.journal.stage_panel(self.bot_id, s.owner, controls.id, 'sync-controls')
+            # ForceReply must be the last new message so Telegram focuses the reply composer.
+            prompt = await client.send_message(s.owner, text, buttons=Button.force_reply(single_use=True),
+                                               link_preview=False)
+            await self._activate(s, prompt.id, 'prompt', controls_mid=controls.id)
+        except Exception:
+            if s.sync_controls_mid != controls.id:
+                try:
+                    await client.delete_messages(s.owner, [controls.id])
+                    self.journal.forget_retired_panel(self.bot_id, s.owner, controls.id)
+                except Exception:
+                    logger.warning('未能清理未完成的手动同步按钮', exc_info=True)
+            raise
         s.prompt = prompt
         self._arm_wait(s)
 
@@ -519,7 +590,7 @@ class AdminPanel:
             value = (event.raw_text or '').strip()
             invalid_input = event.message.forward or (event.message.media and not isinstance(
                 event.message.media, types.MessageMediaWebPage))
-            if not s or s.prompt_id != reply_id:
+            if not s or not s.prompt_id or reply_id not in (s.prompt_id, s.sync_controls_mid):
                 try:
                     original = await event.get_reply_message()
                 except Exception:
@@ -585,6 +656,7 @@ class AdminPanel:
                 return
             source_label = f'{source_title}（{source}）' if source_title else self.bot.channel_label(source)
             target_label = f'{target_title}（{target}）' if target_title else self.bot.channel_label(target)
+            s.pair_titles = source_title, target_title
             label = '新增配对' if action == 'add' else '更改配对'
             await self._confirm(s, ('pairs', action, str(source), str(target)),
                                 f'{label}：{source_label} → {target_label}。'
@@ -602,7 +674,10 @@ class AdminPanel:
                 cmd = ('/export_range', s.start_link, value)
                 src, first, last, error = self.export_range(cmd)
                 if not error:
-                    await self._confirm(s, cmd, f'源频道：{src}\n目标频道：{s.guard}\n消息 ID 范围：{first} 至 {last}', event=event)
+                    await self._confirm(s, cmd,
+                                        f'源频道：{self.bot.channel_label(src)}\n'
+                                        f'目标频道：{self.bot.channel_label(s.guard)}\n消息 ID 范围：{first} 至 {last}',
+                                        event=event)
                 else:
                     await result('❌ 起止链接必须是同一频道的有效原帖，并按 ID 升序填写。未入队。')
         elif stage in ('target', 'add'):
@@ -681,8 +756,11 @@ class AdminPanel:
             return
         s.command, s.expires = (), 0
         if cmd[0] == 'pairs':
+            source_title, target_title = s.pair_titles
+            s.pair_titles = ('', '')
             try:
-                self.bot.change_channel_pair(cmd[1], *(int(cid) for cid in cmd[2:]), expected=guard[1])
+                self.bot.change_channel_pair(cmd[1], *(int(cid) for cid in cmd[2:]), expected=guard[1],
+                                             source_title=source_title, target_title=target_title)
             except ValueError as exc:
                 await result(f'❌ {exc}')
             else:

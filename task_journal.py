@@ -55,11 +55,18 @@ class TaskJournal:
                        'SELECT mid FROM admin_panel_replies WHERE bot=? AND owner=? '
                        'ORDER BY mid DESC LIMIT 1 OFFSET 127)', (bot, owner, bot, owner))
 
-    def activate_panel(self, bot, owner, mid, kind):
+    def stage_panel(self, bot, owner, mid, kind):
+        with self.open() as db:
+            db.execute('INSERT INTO admin_panels VALUES(?,?,?,?,0)', (bot, owner, mid, kind))
+
+    def activate_panel(self, bot, owner, mid, kind, *, controls_mid=0):
         # Commit the new pointer and the outstanding deletions before contacting Telegram again.
         with self.open() as db:
             db.execute('UPDATE admin_panels SET active=0 WHERE bot=? AND owner=? AND active=1', (bot, owner))
             db.execute('INSERT OR REPLACE INTO admin_panels VALUES(?,?,?,?,1)', (bot, owner, mid, kind))
+            if controls_mid:
+                db.execute('UPDATE admin_panels SET active=1 WHERE bot=? AND owner=? AND mid=?',
+                           (bot, owner, controls_mid))
             return db.execute('SELECT mid,kind FROM admin_panels WHERE bot=? AND owner=? AND active=0',
                               (bot, owner)).fetchall()
 

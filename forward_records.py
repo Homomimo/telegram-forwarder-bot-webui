@@ -34,15 +34,23 @@ class Delivery:
         return result
 
 
-def post_url(channel, mid, album=False):
-    if type(channel) is not int or type(mid) is not int or not 0 < mid < 2**31:
+def post_channel_url(channel):
+    if type(channel) is not int:
         return None
     if channel < 0:
         channel, peer = utils.resolve_id(channel)
         if peer is not types.PeerChannel:
             return None
     if 0 < channel <= 997_852_516_352:
-        return f'https://t.me/c/{channel}/{mid}' + ('?single' if album else '')
+        return f'https://t.me/c/{channel}'
+
+
+def post_url(channel, mid, album=False):
+    if type(mid) is not int or not 0 < mid < 2**31:
+        return None
+    base = post_channel_url(channel)
+    if base:
+        return f'{base}/{mid}' + ('?single' if album else '')
 
 
 def post_anchor(row, mid):
@@ -71,7 +79,7 @@ def _heading(row):
     return f'{icon} #{escape(str(row["id"]))}　{escape(row.get("kind", "旧版记录"))}'
 
 
-def history_list(rows, page):
+def history_list(rows, page, *, labels=None):
     """rows are newest first, bounded by the caller's snapshot."""
     total = len(rows)
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -81,7 +89,10 @@ def history_list(rows, page):
     for row in rows[(page-1)*PAGE_SIZE:page*PAGE_SIZE]:
         source = row['from']
         preview = escape(source[:100]) + ('…' if len(source) > 100 else '')
-        text.append(f'{_heading(row)}\n来源：{preview}\n{escape(row["date"][:32])} · {counts(row)}\n目标帖：{_target(row)}')
+        channels = labels(row) if labels else None
+        context = (f'源频道：{escape(channels["source_label"])}\n目标频道：{escape(channels["target_label"])}\n'
+                   if channels else '')
+        text.append(f'{_heading(row)}\n{context}来源：{preview}\n{escape(row["date"][:32])} · {counts(row)}\n目标帖：{_target(row)}')
         buttons.append((f'#{row["id"]} 详情', f'hdetail:{page}:{row["id"]}:1'))
     if not total:
         text.append('暂无转发记录')
@@ -97,7 +108,7 @@ def _chunks(text, size=1200):
         yield escape(text[i:i+size])
 
 
-def history_detail(row, origin, page):
+def history_detail(row, origin, page, *, labels=None):
     # Bound the visible UTF-16 size, not the number of members; links always stay intact.
     chunks, lines, used = [], [], 0
     def line(html):
@@ -111,9 +122,14 @@ def history_detail(row, origin, page):
             line(part)
     route = row.get('route', '旧版未记录')
     line('发送方式：' + escape(_LEGACY_ROUTES.get(route, route)))
-    if type(row.get('source_channel')) is int:
-        line(f'源频道 ID：{row["source_channel"]}')
-    line(f'目标频道 ID：{row["to"]}')
+    if labels:
+        channels = labels(row)
+        line('源频道：' + escape(channels['source_label']))
+        line('目标频道：' + escape(channels['target_label']))
+    else:
+        if type(row.get('source_channel')) is int:
+            line(f'源频道 ID：{row["source_channel"]}')
+        line(f'目标频道 ID：{row["to"]}')
     members = row.get('members')
     if not members or not any(result > 0 for _, result in members):
         line('目标帖：' + _target(row))

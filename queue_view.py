@@ -34,8 +34,8 @@ def _task_label(task):
 
 def _task_row(category, task, index):
     text = _task_label(task)
-    source = queue_excerpt(task['link'])
-    target = task['target_chat_id']
+    source = queue_excerpt(task['link']) + f" · {task['source_label']}"
+    target = task['target_label']
     if category == 'queued':
         return f"{index}. {text} · {source} → {target} · 已等 {format_duration(task['age'])}"
     if category == 'retry':
@@ -66,7 +66,8 @@ def render_queue_status(snapshot, review_text):
     if current:
         count = '尚未确认' if current['count'] is None else f"{current['count']} 条"
         lines = [f"▶️ 正在处理 {_task_label(current)} · 已运行 {format_duration(current['elapsed'])}",
-                 f"源：{queue_excerpt(current['link'])}", f"目标：{current['target_chat_id']} · 消息数：{count}"]
+                 f"源：{current['source_label']}", f"源帖：{queue_excerpt(current['link'])}",
+                 f"目标：{current['target_label']} · 消息数：{count}"]
         if current['followup']:
             lines.append('另有 1 次后续编辑已合并，将读取源帖最新内容。')
         heading.append('\n'.join(lines))

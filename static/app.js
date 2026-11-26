@@ -22,8 +22,8 @@ const paths = {
 function ico(k) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[k === "mappings" || k === "pairs" ? "jobs" : k]}"/></svg>`;
 }
-const pair = (k, v) =>
-  `<div class="pair"><span>${k}</span><span>${esc(v)}</span></div>`;
+const pair = (k, v, url) =>
+  `<div class="pair"><span>${k}</span><span>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(v)}</a>` : esc(v)}</span></div>`;
 function notify(t) {
   $("#toast").textContent = t;
   $("#toast").classList.add("show");
@@ -63,7 +63,8 @@ function channelLabel(id) {
   const marked = markedId(id);
   const bare = -Number(marked) - 1000000000000;
   const name = s.channel_names?.[bare] || s.channel_names?.[marked];
-  return name ? `${name}（${marked}）` : marked;
+  const display = bare > 0 ? String(bare) : String(id);
+  return name ? `${name}（${display}）` : display;
 }
 function modal(title, html, ok, fn) {
   $("#mt").textContent = title;
@@ -137,8 +138,9 @@ function draw() {
   const card = (title, body, extra = "") =>
     `<section class="card">${head(title, extra)}${body}</section>`;
   const queueRows = [];
+  const sourceCell = (label, link) => `${esc(label)}<small class="cellSub">${esc(link)}</small>`;
   function taskRow(status, job) {
-    return `<tr><td>#${esc(job.job_id)}</td><td>${esc(status)}</td><td>${esc(job.link)}</td><td>${esc(channelLabel(job.target_chat_id))}</td></tr>`;
+    return `<tr><td>#${esc(job.job_id)}</td><td>${esc(status)}</td><td>${sourceCell(job.source_label, job.link)}</td><td>${esc(job.target_label)}</td></tr>`;
   }
   if (q.current_task) queueRows.push(taskRow("执行中", q.current_task));
   for (const [key, label] of [
@@ -157,18 +159,18 @@ function draw() {
   }
   const records = (rows) =>
     table(
-      ["任务 / 记录", "来源", "发送路径", "结果", ""],
+      ["任务 / 记录", "源频道", "目标频道", "发送路径", "结果", ""],
       rows.map(
         (r) =>
-          `<tr><td>${r.job_id ? "#" + esc(r.job_id) + " / " : ""}${esc(r.id)}<small class="cellSub">${esc({ web: "网页", bot: "Bot", monitor: "自动监听" }[r.origin] || "")}</small></td><td>${esc(r.from)}</td><td>${esc(r.route || "旧记录")}</td><td>${tag(r.success ? "done" : r.unconfirmed ? "review" : "failed", r.success ? "已完成" : r.unconfirmed ? "待核对" : "失败")}</td><td>${btn("detail", "详情", "", r.id)}</td></tr>`,
+          `<tr><td>${r.job_id ? "#" + esc(r.job_id) + " / " : ""}${esc(r.id)}<small class="cellSub">${esc({ web: "网页", bot: "Bot", monitor: "自动监听" }[r.origin] || "")}</small></td><td>${sourceCell(r.source_label, r.from)}</td><td>${esc(r.target_label)}</td><td>${esc(r.route || "旧记录")}</td><td>${tag(r.success ? "done" : r.unconfirmed ? "review" : "failed", r.success ? "已完成" : r.unconfirmed ? "待核对" : "失败")}</td><td>${btn("detail", "详情", "", r.id)}</td></tr>`,
       ),
       "尚无转发记录。",
     );
   const review = table(
-    ["任务", "源帖", ""],
+    ["任务", "源频道", "目标频道", ""],
     s.reviews.map(
       (r) =>
-        `<tr><td>#${esc(r.id)}</td><td>${esc(r.link)}</td><td>${btn("resolve", "标为已核对", "", r.id)}</td></tr>`,
+        `<tr><td>#${esc(r.id)}</td><td>${sourceCell(r.source_label, r.link)}</td><td>${esc(r.target_label)}</td><td>${btn("resolve", "标为已核对", "", r.id)}</td></tr>`,
     ),
     "没有待核对的任务。",
   );
@@ -183,7 +185,7 @@ function draw() {
     body +=
       card(
         "活动任务",
-        table(["任务", "状态", "来源", "目标"], queueRows, "当前队列为空。"),
+        table(["任务", "状态", "源频道", "目标频道"], queueRows, "当前队列为空。"),
       ) + card(`待人工核对（${s.review_total}）`, review);
   } else if (page === "history") {
     body += card("最近 100 条转发记录", records(history));
@@ -215,14 +217,15 @@ function draw() {
     body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1) + clear);
   } else if (page === "pairs") {
     const { strict, rows, missing } = s.pairing;
-    const status = strict ? "严格一对一已启用" : "准备切换 · 自动复制仍使用旧版目标";
+    const status = strict ? "严格一对一已启用" : "准备切换 · 自动复制仍使用默认共享目标";
     const waiting = !strict && missing.length
       ? `<p class="hint">尚未启用配对的现有监听源：${missing.map((id) => esc(channelLabel(id))).join("、")}</p>` : "";
-    const enable = !strict && !missing.length && rows.some((row) => row.enabled)
-      ? btn("activatePairs", "启用严格一对一…") : "";
+    let modeAction = "";
+    if (strict) modeAction = btn("deactivatePairs", "关闭严格一对一…");
+    else if (!missing.length && rows.some((row) => row.enabled)) modeAction = btn("activatePairs", "启用严格一对一…");
     body += card(status, waiting + table(["源频道", "目标频道", "状态", "操作"], rows.map((row) =>
       `<tr><td>${esc(channelLabel(row.source))}</td><td>${esc(channelLabel(row.target))}</td><td>${row.enabled ? "启用" : "暂停"}</td><td><div class="actions">${btn("editPair", "更改目标", "", row.source)}${btn("togglePair", row.enabled ? "暂停" : "恢复", "", row.source)}${btn("deletePair", "删除", "", row.source)}</div></td></tr>`
-    ), "尚未配置频道配对。"), `<div class="actions">${btn("addPair", "新增配对")}${enable}</div>`);
+    ), "尚未配置频道配对。"), `<div class="actions">${btn("addPair", "新增配对")}${modeAction}</div>`);
   } else {
     body += card(
       "默认目标频道",
@@ -295,7 +298,7 @@ function newTask() {
   ).join("");
   modal(
     "新建转发",
-    `<div class="note">目标：${esc(channelLabel(target))} · 相册整组发送，?single 仅发选中成员。</div><label>任务类型<select name="kind" id="kind"><option value="link">链接或相册</option><option value="range">历史范围</option></select></label>${field("源帖链接", "src", "https://t.me/channel_name/123")}<label id="endRow" hidden>结束消息 ID<input name="end" inputmode="numeric"></label>`,
+    `<div class="note">目标频道：${esc(channelLabel(target))} · 相册整组发送，?single 仅发选中成员。</div><label>任务类型<select name="kind" id="kind"><option value="link">链接或相册</option><option value="range">历史范围</option></select></label>${field("源帖链接", "src", "https://t.me/channel_name/123")}<small id="taskSourceLabel" hidden></small><label id="endRow" hidden>结束消息 ID<input name="end" inputmode="numeric"></label>`,
     "确认入队",
     async (p) => {
       const r = await act("submit", { ...p, target, key });
@@ -304,6 +307,12 @@ function newTask() {
   );
   $("#kind").onchange = (e) => {
     $("#endRow").hidden = e.target.value !== "range";
+  };
+  $('#fields input[name="src"]').oninput = (e) => {
+    const match = e.target.value.trim().match(/^https?:\/\/t\.me\/(?:c\/([1-9]\d{0,11})|([a-z][a-z0-9_]{0,31}))\/[1-9]\d{0,9}\/?(?:\?single)?$/i);
+    const preview = $("#taskSourceLabel");
+    preview.hidden = !match;
+    preview.textContent = match ? `源频道：${match[1] ? channelLabel(match[1]) : "@" + match[2]}` : "";
   };
 }
 function configureChannel(isTarget) {
@@ -361,10 +370,12 @@ function editPair(id) {
       const src = row ? { channel: row.source } : await resolve(p.source);
       const dst = await resolve(p.target);
       if (generation !== dialogGeneration || !$("#dlg").open) return false;
-      const display = (info) => info.title ? `${info.title}（${markedId(info.channel)}）` : channelLabel(info.channel);
+      const display = (info) => info.title ? `${info.title}（${info.channel}）` : channelLabel(info.channel);
       modal(label, pair("源频道", display(src)) + pair("目标频道", display(dst)) +
         '<p class="hint">请核对频道。Bot 尚未验证读写权限。</p>', "确认保存",
-        () => savePair(row ? "edit" : "add", revision, { source: src.channel, target: dst.channel }));
+        () => savePair(row ? "edit" : "add", revision, {
+          source: src.channel, target: dst.channel, source_title: src.title || "", target_title: dst.title || "",
+        }));
       return false;
     });
 }
@@ -385,6 +396,16 @@ const handlers = {
     const { revision } = s.pairing;
     modal("启用严格一对一", "<p>切换后自动复制按频道配对发送。手动和批量转发继续使用默认目标，已入队任务保留原目标。</p>",
       "确认启用", () => savePair("activate", revision));
+  },
+  deactivatePairs: () => {
+    const { pairing: { revision }, sources, config: { target } } = s;
+    const labels = sources.map(channelLabel).join("、") || "未设置";
+    const idle = !target || !sources.some((id) => markedId(id) !== markedId(target));
+    modal("关闭严格一对一",
+      "<p>确认后恢复默认共享目标。已保存的配对、源帖映射和已入队任务会保留。</p>" +
+      pair("旧版监听源", labels) + pair("默认共享目标", channelLabel(target)) +
+      (idle ? '<p class="hint">当前配置下，关闭后不会自动转发。</p>' : ""),
+      "确认关闭", () => savePair("deactivate", revision));
   },
   mappingPage: (id) => loadMappings(id),
   clearMappings: () =>
@@ -429,20 +450,25 @@ const handlers = {
   detail: (id) => {
     const r = s.history.find((x) => String(x.id) === id);
     if (!r) return;
+    const members = r.members || [];
+    const links = members.map(([src, dst]) => {
+      const confirmed = Number.isInteger(dst) && dst > 0 && dst < 2 ** 31;
+      const url = confirmed && r.target_post_base
+        ? `${r.target_post_base}/${dst}${r.album ? "?single" : ""}` : "";
+      const result = url ? "查看目标消息 " + dst
+        : confirmed ? "目标消息 " + dst : dst === 0 ? "待核对" : "未发送";
+      return pair("源消息 " + src, result, url);
+    });
+    const legacy = !members.some(([, dst]) => dst > 0) && r.legacy_target_url
+      ? pair("目标帖", "查看目标消息", r.legacy_target_url) : "";
     modal(
       "转发记录 " + id,
-      `<p>${esc(r.from)} → ${esc(channelLabel(r.to))}</p><p>${esc(r.route || "")} ${esc(r.error || "")}</p>` +
+      pair("源频道", r.source_label) + pair("目标频道", r.target_label) +
+        `<p>${esc(r.from)}</p><p>${esc(r.route || "")} ${esc(r.error || "")}</p>` +
         (r.album_groups || [])
           .map((ids) => pair("源相册分组", ids.join("、")))
           .join("") +
-        (r.members || [])
-          .map(([src, dst]) =>
-            pair(
-              "源消息 " + src,
-              dst > 0 ? "目标消息 " + dst : dst === 0 ? "待核对" : "未发送",
-            ),
-          )
-          .join(""),
+        legacy + links.join(""),
       null,
       null,
     );

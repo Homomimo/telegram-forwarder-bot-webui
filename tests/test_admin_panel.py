@@ -64,11 +64,13 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         return self.messages[self.session.mid]
 
     def button(self, label):
-        markup = TelegramClient.build_reply_markup(self.page.buttons)
+        current = self.messages[self.session.mid or self.session.sync_controls_mid]
+        markup = TelegramClient.build_reply_markup(current.buttons)
         return next(b.type.data for row in markup.rows for b in row.buttons if b.text == label)
 
     async def hit(self, data, uid=UID, chat=UID, mid=None, via_inline=False, message=None):
-        ev = NS(data=data, sender_id=uid, chat_id=chat, message_id=self.session.mid if mid is None else mid,
+        ev = NS(data=data, sender_id=uid, chat_id=chat,
+                message_id=(self.session.mid or self.session.sync_controls_mid) if mid is None else mid,
                 via_inline=via_inline, answer=AsyncMock(), respond=AsyncMock(side_effect=lambda t, **kw: self.send(chat,t,**kw)),
                 client=self.client, get_message=AsyncMock(return_value=message))
         await self.cb(ev)
@@ -93,23 +95,59 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
     async def reply(self, text):
         return await self.text(text, reply=self.session.prompt_id)
 
-    async def test_sync_replaces_home_with_one_prompt_and_cancel_retires_it(self):
+    async def test_sync_replaces_home_with_controls_and_force_reply_and_cancels_both(self):
         home = self.page
         await self.click('🔄 手动同步')
         prompt = self.session.prompt_id
-        self.assertEqual(list(self.messages), [prompt])
+        controls = self.session.sync_controls_mid
+        self.assertEqual(list(self.messages), [controls, prompt])
         self.client.delete_messages.assert_awaited_once_with(UID, [home.id])
         self.client.edit_message.assert_not_awaited()
-        self.assert_input_receipt(await self.reply('取消'), '已取消')
+        key = self.button('⬅️ 取消并返回')
+        await self.click('⬅️ 取消并返回')
         self.assertEqual(self.session.prompt_id, 0)
-        receipt = self.page
-        await self.click('⬅️ 返回面板')
-        self.assertNotIn(receipt.id, self.messages)
+        self.assertNotIn(prompt, self.messages)
+        self.assertNotIn(controls, self.messages)
         self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
-        old = await self.text(f'https://t.me/c/{SOURCE}/42', reply=prompt)
-        self.assertIn('已失效', old.respond.await_args.args[0])
+        duplicate = await self.hit(key, mid=controls)
+        self.assertTrue(duplicate.answer.await_args.kwargs['alert'])
+        for mid in (prompt, controls):
+            old = await self.text(f'https://t.me/c/{SOURCE}/42', reply=mid)
+            self.assertIn('已失效', old.respond.await_args.args[0])
         self.bot.do_forward.assert_not_awaited()
         self.assertTrue(self.bot.task_queue.queue.empty())
+
+    async def test_sync_prompt_can_return_to_home_without_a_text_reply(self):
+        self.bot.channel_names[TARGET] = '归档频道'
+        await self.click('🔄 手动同步')
+        prompt = self.session.prompt_id
+        controls = self.messages[self.session.sync_controls_mid]
+        self.assertIn('手动同步', controls.raw_text)
+        self.assertIn(f'当前目标：归档频道（{TARGET}）', controls.raw_text)
+        self.assertNotIn('回复「取消」', controls.raw_text)
+        self.assertIsInstance(self.messages[prompt].buttons, types.ReplyKeyboardForceReply)
+        markup = TelegramClient.build_reply_markup(controls.buttons)
+        self.assertEqual([[button.text for button in row.buttons] for row in markup.rows],
+                         [['⬅️ 取消并返回']])
+        await self.click('⬅️ 取消并返回')
+        self.assertEqual(list(self.messages), [self.page.id])
+        self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
+        self.assertTrue(self.bot.task_queue.queue.empty())
+
+    async def test_sync_force_reply_send_failure_removes_staged_controls(self):
+        home = self.page
+
+        def send(chat, text, **kwargs):
+            if isinstance(kwargs.get('buttons'), types.ReplyKeyboardForceReply):
+                raise ConnectionError('reply prompt unavailable')
+            return self.send(chat, text, **kwargs)
+
+        with patch.object(self.client, 'send_message', side_effect=send), self.assertLogs('admin_panel', 'ERROR'):
+            await self.click('🔄 手动同步')
+        self.assertIs(self.page, home)
+        self.assertEqual([message.id for message in self.messages.values() if message.buttons], [home.id])
+        await self.click('🔄 手动同步')
+        self.assertIn(self.session.prompt_id, self.messages)
 
     async def test_replayed_cancel_after_restart_never_reports_missing_prompt(self):
         await self.click('🔄 手动同步')
@@ -159,7 +197,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.client.delete_messages.assert_not_awaited()
         self.assertIn(root.id, self.messages)
         await self.click('🔄 手动同步')
-        self.assertEqual(list(self.messages), [self.session.prompt_id])
+        self.assertEqual(list(self.messages), [self.session.sync_controls_mid, self.session.prompt_id])
 
     async def test_delete_failure_disables_previous_panel_buttons(self):
         replacement = self.page
@@ -197,12 +235,16 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(home.id, self.messages)
 
     async def test_flog_pages_keep_position_as_records_arrive_expire_or_clear(self):
-        rows = [dict(id=str(i), date='date', to=TARGET, success=True, **{'from': 'link'}) for i in range(1, 13)]
+        self.bot.channel_names.update({SOURCE: '素材<库>', TARGET: '归档频道'})
+        rows = [dict(id=str(i), date='date', to=TARGET, success=True,
+                     **{'from': f'https://t.me/c/{SOURCE}/{i}'}) for i in range(1, 13)]
         self.bot.forward_log.get_all.side_effect = lambda: list(rows)
         await self.text('/flog 2')
         self.assertIn('#7　', self.page.raw_text)
+        self.assertIn(f'源频道：素材&lt;库&gt;（{SOURCE}）', self.page.raw_text)
         rows.append(dict(rows[-1], id='13'))
         await self.click('#7 详情'); self.assertIn('#7　', self.page.raw_text)
+        self.assertIn(f'目标频道：归档频道（{TARGET}）', self.page.raw_text)
         await self.click('⬅️ 返回记录'); self.assertIn('第 2/3 页', self.page.raw_text)
         self.assertNotIn('#8　', self.page.raw_text)
         await self.click('上一页'); self.assertNotIn('#13　', self.page.raw_text)
@@ -252,7 +294,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_bot_can_add_activate_and_pause_channel_pair(self):
         await self.click('📡 监听频道')
         await self.click('🔀 频道配对')
-        self.assertIn('准备切换', self.page.raw_text)
+        self.assertIn('自动复制仍使用默认共享目标', self.page.raw_text)
         self.assertNotIn('pair:activate', self.session.choices.values())
         await self.click('➕ 新增配对')
         destination = TARGET + 1
@@ -276,6 +318,43 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await self.click('确认执行')
         self.assertIsNone(self.bot.automatic_target(SOURCE))
         self.assertEqual(self.bot.target_chat_id, TARGET)
+
+    async def test_bot_saves_recognized_pair_names_after_confirmation(self):
+        await self.click('📡 监听频道')
+        await self.click('🔀 频道配对')
+        await self.click('➕ 新增配对')
+        destination = TARGET + 1
+        resolve = AsyncMock(side_effect=[(SOURCE, '科技快讯'), (destination, '快讯归档')])
+        with patch.object(self.bot, 'resolve_channel', resolve):
+            await self.reply('@news,@archive')
+        self.assertIn('科技快讯', self.page.raw_text)
+        self.assertNotIn(SOURCE, self.bot.channel_names)
+        await self.click('确认执行')
+        await self.click('⬅️ 返回面板')
+        await self.click('📡 监听频道')
+        await self.click('🔀 频道配对')
+        self.assertTrue(self.button(f'科技快讯（{SOURCE}） → 快讯归档（{destination}） · 启用'))
+
+    async def test_bot_confirms_disabling_strict_pairs_without_legacy_settings(self):
+        bot = self.bot
+        bot.target_chat_id = None
+        bot.monitor_chat_ids = []
+        bot.change_channel_pair('add', SOURCE, TARGET, expected=bot.pairing_revision)
+        bot.change_channel_pair('activate', expected=bot.pairing_revision)
+        await self.click('📡 监听频道')
+        await self.click('🔀 频道配对')
+        await self.click('关闭严格一对一…')
+        self.assertIn('旧版监听源：未设置', self.page.raw_text)
+        self.assertIn('默认共享目标：未设置', self.page.raw_text)
+        self.assertIn('关闭后不会自动转发', self.page.raw_text)
+        await self.click('取消')
+        self.assertTrue(bot.strict_pairs)
+        await self.click('📡 监听频道')
+        await self.click('🔀 频道配对')
+        await self.click('关闭严格一对一…')
+        await self.click('确认执行')
+        self.assertFalse(bot.strict_pairs)
+        self.assertEqual(bot.channel_pairs[SOURCE][:2], (TARGET, True))
 
     async def test_webui_url_only_appears_beside_source_mappings_in_configured_private_home(self):
         label = '🌐 打开 WebUI'
@@ -435,10 +514,11 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, 'delete_messages', side_effect=ConnectionError('offline')), self.assertLogs('admin_panel', 'WARNING'):
             await self.click('🔄 手动同步')
         prompt = self.session.prompt_id
-        self.assertEqual(set(self.messages), {original, prompt})
+        controls = self.session.sync_controls_mid
+        self.assertEqual(set(self.messages), {original, controls, prompt})
         await restart()
         self.assertEqual(list(self.messages), [self.page.id])
-        self.assertNotIn(self.page.id, (original, prompt))
+        self.assertNotIn(self.page.id, (original, controls, prompt))
         self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
 
     async def test_button_owner_generation_and_message_binding(self):
@@ -591,14 +671,16 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.bot.do_forward.assert_awaited_once()
 
     async def test_export_preview_and_concurrent_confirmation_admit_once(self):
+        self.bot.channel_names.update({SOURCE: '素材库', TARGET: '归档频道'})
         await self.click('📦 批量转发')
         first = await self.reply(f'https://t.me/c/{SOURCE}/100')
         first.respond.assert_not_awaited()  # the second ForceReply prompt is already the receipt
         self.assertEqual(self.client.send_message.await_args.kwargs['reply_to'], first.message.id)
         self.assertIn('尚未入队', self.messages[self.session.prompt_id].raw_text)
+        self.assertIn(f'当前目标：归档频道（{TARGET}）', self.messages[self.session.prompt_id].raw_text)
         last = await self.reply(f'https://t.me/c/{SOURCE}/110')
         self.assert_input_receipt(last, '待确认')
-        for detail in (str(SOURCE), str(TARGET), '100 至 110'):
+        for detail in (f'源频道：素材库（{SOURCE}）', f'目标频道：归档频道（{TARGET}）', '100 至 110'):
             self.assertIn(detail, self.page.raw_text)
         self.assertTrue(self.bot.task_queue.queue.empty())
         confirm = self.button('确认执行')

@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 import accounts
 from channel_input import numeric_channel, parse_reference
+from forward_records import post_channel_url, post_url
 import web_sessions
 
 ROOT = Path(__file__).resolve().parent
@@ -63,6 +64,12 @@ class Console:
                     )
                     if k in row
                 }
+                | bot.history_channel_labels(row)
+                | {
+                    "target_post_base": post_channel_url(row["to"]),
+                    "legacy_target_url": post_url(row["to"], row.get("target_message_id"), row.get("album"))
+                    if row.get("success") else None,
+                }
                 for row in reversed(history)
             ]
             total, reviews = queue.journal.reviews(limit=100)
@@ -79,7 +86,12 @@ class Console:
                     )
                 },
                 queue=queue.snapshot(limit=60),
-                reviews=[{"id": r["job_id"], "link": r["link"]} for r in reviews],
+                reviews=[
+                    dict(id=r["job_id"], link=r["link"],
+                         source_label=bot.source_channel_label(r["link"], r.get("source_chat_id")),
+                         target_label=bot.channel_label(r["target_chat_id"]))
+                    for r in reviews
+                ],
                 review_total=total,
                 history=recent,
                 sources=bot.monitor_chat_ids,
@@ -92,15 +104,19 @@ class Console:
         check(queue.running and not bot._stopping, "Bot 队列尚未就绪")
         if op == "channel-pair":
             action = p.get("action")
-            check(action in ("add", "edit", "toggle", "delete", "activate"), "无效的频道配对操作")
+            check(action in ("add", "edit", "toggle", "delete", "activate", "deactivate"), "无效的频道配对操作")
             check(p.get("confirmed") is True, "请确认频道配对操作")
             source = numeric_channel(str(p.get("source", "")))
             target = numeric_channel(str(p.get("target", "")))
-            if action != "activate":
+            if action not in ("activate", "deactivate"):
                 check(source, "请选择有效的源频道")
             if action in ("add", "edit"):
                 check(target, "请选择有效的目标频道")
-            bot.change_channel_pair(action, source, target, expected=p.get("revision"))
+            source_title, target_title = p.get("source_title", ""), p.get("target_title", "")
+            check(all(isinstance(title, str) and len(title) <= 256 for title in (source_title, target_title)),
+                  "识别到的频道名称无效")
+            bot.change_channel_pair(action, source, target, expected=p.get("revision"),
+                                    source_title=source_title, target_title=target_title)
             return {"ok": True}
         if op == "clear-mappings":
             check(p.get("confirmed") is True, "请确认清理全部源帖映射")

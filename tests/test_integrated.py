@@ -136,6 +136,73 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         bot.task_queue.queue.task_done()
         self.assertEqual((task.mode, task.target_chat_id, task.message_ids), ('monitor_edit', target, [8]))
 
+    async def test_disable_pairs_persists_legacy_route_and_retains_pairs_mappings_and_queued_targets(self):
+        from console_http import Console
+
+        bot = self.bot
+        bot.task_queue.running = True
+        pair_target = TARGET + 1
+        bot.change_channel_pair('add', SOURCE, pair_target, expected=bot.pairing_revision)
+        bot.change_channel_pair('activate', expected=bot.pairing_revision)
+        saved_pairs = bot.channel_pairs.copy()
+        mappings = bot.monitor_message_map()
+        mappings.remember(SOURCE, pair_target, {1: 101})
+        mappings.remember(SOURCE, TARGET, {2: 102})
+        await self.enqueue(self.event(3))
+        console = Console(bot, app, bot.console_data)
+        payload = {'action': 'deactivate', 'revision': bot.pairing_revision}
+        with self.assertRaisesRegex(ValueError, '请确认'):
+            await console.command('channel-pair', payload)
+        self.assertTrue(bot.strict_pairs)
+        await console.command('channel-pair', {**payload, 'confirmed': True})
+        self.assertFalse(bot.strict_pairs)
+        self.assertEqual(bot.channel_pairs, saved_pairs)
+        self.assertEqual(mappings.get(SOURCE, 1, pair_target), 101)
+        self.assertEqual(mappings.get(SOURCE, 2, TARGET), 102)
+        replay = self.event(1)
+        replay.message.date = datetime.fromtimestamp(bot.legacy_resumed_at - 1, timezone.utc)
+        await self.enqueue(replay)
+        await self.enqueue(self.event(4))
+        expected = [(3, pair_target), (4, TARGET)]
+        self.assertEqual(bot.task_queue.queue.qsize(), len(expected))
+        for mid, target in expected:
+            task = bot.task_queue.queue.get_nowait()
+            bot.task_queue.queue.task_done()
+            self.assertEqual((task.message_ids, task.target_chat_id), ([mid], target))
+        fresh = self.make_bot()
+        config = json.loads((bot.console_data / 'channels.json').read_text('utf-8'))
+        fresh.load_channel_pairs(config)
+        self.assertFalse(fresh.strict_pairs)
+        self.assertEqual(fresh.channel_pairs, saved_pairs)
+        self.assertEqual(fresh.legacy_resumed_at, bot.legacy_resumed_at)
+        fresh.change_channel_pair('activate', expected=fresh.pairing_revision)
+        self.assertEqual(fresh.automatic_target(SOURCE), pair_target)
+
+    async def test_web_pair_persists_recognized_titles_and_preserves_custom_remark(self):
+        from console_http import Console
+
+        bot = self.bot
+        bot.task_queue.running = True
+        console = Console(bot, app, bot.console_data)
+        destination = TARGET + 1
+        bot.update_channels(names={SOURCE: '已有备注'})
+        with patch.object(bot, 'resolve_channel', AsyncMock(side_effect=[
+            (SOURCE, '真实源频道'), (destination, '目标频道\n归档'),
+        ])):
+            source = await console.command('preview-channel', {'channel': '@source'})
+            target = await console.command('preview-channel', {'channel': '@destination'})
+        await console.command('channel-pair', dict(action='add', confirmed=True,
+                                                   revision=bot.pairing_revision, source=source['channel'],
+                                                   target=target['channel'], source_title=source['title'],
+                                                   target_title=target['title']))
+        saved = json.loads((bot.console_data / 'channels.json').read_text('utf-8'))
+        self.assertEqual(saved['names'], {str(SOURCE): '已有备注', str(destination): '目标频道 归档'})
+        self.assertEqual((await console.command('state', {}))['channel_names'][str(destination)], '目标频道 归档')
+        await console.command('channel-pair', dict(action='edit', confirmed=True,
+                                                   revision=bot.pairing_revision, source=str(SOURCE),
+                                                   target=str(destination)))
+        self.assertEqual(bot.channel_names[destination], '目标频道 归档')
+
     async def test_bot_link_http_redemption_and_qr_requests_require_valid_session(self):
         from console_http import Console, Handler
         from web_sessions import COOKIE, LINK_TTL, WebSessions
@@ -276,7 +343,7 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         await console.command(
             "channel-name", {"channel": str(SOURCE), "name": "同名频道"}
         )
-        self.assertEqual(bot.channel_label(target), f"同名频道（{target}）")
+        self.assertEqual(bot.channel_label(target), f"同名频道（{TARGET}）")
         self.assertIn(f"同名频道（{SOURCE}）", bot.format_monitor_chat_ids())
         reply = AsyncMock()
         with patch.object(app, "ADMIN_IDS", [61]):
@@ -290,7 +357,7 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(state["channel_names"][str(target)], "主 归档")
         self.assertEqual(state["config"]["target"], str(target))
         await console.command("remove-source", {"source": str(TARGET)})
-        self.assertEqual(bot.channel_label(target), f"主 归档（{target}）")
+        self.assertEqual(bot.channel_label(target), f"主 归档（{TARGET}）")
         await console.command("target", {"target": str(SOURCE)})
         self.assertNotIn(TARGET, bot.channel_names)
         cfg = json.loads((bot.console_data / "channels.json").read_text("utf-8"))
@@ -322,6 +389,53 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         self.assertNotEqual(bot.target_chat_id, 9999)
         await console.command("channel-name", {**payload, "name": ""})
         self.assertEqual(bot.channel_label(SOURCE), str(SOURCE))
+
+    async def test_web_queue_reviews_and_history_share_channel_labels(self):
+        from console_http import Console
+
+        bot = self.bot
+        bot.update_channels(names={SOURCE: '来源', TARGET: '归档'})
+        target = bot.target_chat_id
+        private = f'https://t.me/c/{SOURCE}/42'
+        public = 'https://t.me/example_source/43'
+        queue = bot.task_queue
+        await queue.add_task(None, private, None, 61, target_chat_id=target)
+        await queue.add_task(None, public, None, 61, target_chat_id=target)
+        review = app.ForwardTask(None, public, None, 61, target, source_chat_id=SOURCE)
+        queue.journal.save(review, 'review')
+        bot.forward_log.get_recent.return_value = [
+            dict(id='1', to=target, **{'from': private}),
+            dict(id='2', to=TARGET + 1, **{'from': public}),
+            dict(id='3', to=target, source_channel=SOURCE, **{'from': public}),
+        ]
+        state = await Console(bot, app, bot.console_data).command('state', {})
+        labels = (f'来源（{SOURCE}）', f'归档（{TARGET}）')
+        for item in (state['queue']['queued'][0], state['reviews'][0], state['history'][0], state['history'][2]):
+            self.assertEqual((item['source_label'], item['target_label']), labels)
+        self.assertEqual(state['queue']['queued'][1]['source_label'], '@example_source')
+        self.assertEqual(state['history'][1]['target_label'], str(TARGET + 1))
+
+    async def test_web_history_exposes_validated_target_post_urls(self):
+        from console_http import Console
+
+        bot = self.bot
+        base = f'https://t.me/c/{TARGET}'
+        common = {'to': bot.target_chat_id, 'from': f'https://t.me/c/{SOURCE}/1'}
+        bot.forward_log.get_recent.return_value = [
+            dict(common, id='album', members=[[1, 101], [2, 0], [3, -1]], album=True, success=False),
+            dict(common, id='legacy', target_message_id=102, success=True),
+            dict(common, id='uncertain', target_message_id=103, success=False),
+            dict(common, id='invalid', to=-123, target_message_id=104, success=True),
+        ]
+        state = await Console(bot, app, bot.console_data).command('state', {})
+        history = {row['id']: row for row in state['history']}
+        self.assertEqual(history['album']['target_post_base'], base)
+        self.assertTrue(history['album']['album'])
+        self.assertEqual(history['album']['members'], [[1, 101], [2, 0], [3, -1]])
+        self.assertEqual(history['legacy']['legacy_target_url'], f'{base}/102')
+        self.assertIsNone(history['uncertain']['legacy_target_url'])
+        self.assertIsNone(history['invalid']['target_post_base'])
+        self.assertIsNone(history['invalid']['legacy_target_url'])
 
     async def test_channel_inputs_converge_without_network_or_duplicate_monitor(self):
         from console_http import Console

@@ -129,7 +129,7 @@ class MonitorReliabilityTests(MonitorHarness, unittest.IsolatedAsyncioTestCase):
         with patch.object(app, 'ADMIN_IDS', [61]):
             self.bot.target_chat_id = TARGET + 1  # Review uses the job's original route.
             await self.bot.run_admin_action(NS(sender_id=61), ['/queue'], respond)
-            self.assertIn(f'→ https://t.me/c/{TARGET}/88', respond.await_args.args[0])
+            self.assertIn(f'→ {TARGET} · https://t.me/c/{TARGET}/88', respond.await_args.args[0])
             mappings = self.bot.monitor_message_map()
             with mappings.db:
                 mappings.db.execute('DELETE FROM monitor_messages')
