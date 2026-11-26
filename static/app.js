@@ -103,7 +103,7 @@ const pages = {
   home: "工作台",
   jobs: "任务队列",
   history: "转发记录",
-  mappings: "同步映射",
+  mappings: "源帖映射",
   settings: "工作台设置",
 };
 function go(k) {
@@ -205,10 +205,10 @@ function draw() {
       const { page: current, pages: totalPages, total } = mappings;
       const previous = current > 1 ? btn("mappingPage", "上一页", "", current - 1) : "";
       const next = current < totalPages ? btn("mappingPage", "下一页", "", current + 1) : "";
-      content += table(["源帖", "目标帖", "确认时间"], rows, "暂无已确认的自动同步映射。");
+      content += table(["源帖", "目标帖", "确认时间"], rows, "暂无已确认的源帖映射。");
       content += `<div class="actions">${previous}<span>第 ${current}/${totalPages} 页 · 共 ${total} 条</span>${next}</div>`;
     } else if (!mappingError) {
-      content = '<p class="hint" role="status">正在读取同步映射…</p>';
+      content = '<p class="hint" role="status">正在读取源帖映射…</p>';
     }
     body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1));
   } else {
@@ -231,8 +231,12 @@ function draw() {
     );
     body += accountCards();
   }
+  const title = page === "mappings" ? "自动复制的源帖映射" : pages[page];
+  const description = page === "mappings"
+    ? "查看已确认自动复制的源帖及其对应的目标帖。点击链接可打开对应消息。"
+    : "请仅转发获授权的内容";
   $("#page").innerHTML =
-    `<div class="rowhead"><div><h1>${pages[page]}</h1><div class="sub">请仅转发获授权的内容</div></div>${btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
+    `<div class="rowhead"><div><h1>${title}</h1><div class="sub">${description}</div></div>${btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
 }
 async function loadMappings(number) {
   const epoch = authEpoch;
@@ -248,7 +252,7 @@ async function loadMappings(number) {
     mappings = result;
   } catch {
     if (epoch !== authEpoch || request !== mappingRequest) return;
-    mappingError = "同步映射暂不可用，请刷新重试。";
+    mappingError = "源帖映射暂不可用，请刷新重试。";
   }
   if (page === "mappings") draw();
 }
