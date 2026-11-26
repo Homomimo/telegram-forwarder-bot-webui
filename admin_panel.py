@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 PREFIX = b'ap1:'
 PROMPT = '⌨️ 管理面板输入｜'
 TTL = 300
-HOME = [[('🎯 目标频道', 'target'), ('📡 监听频道', 'monitor')],
+HOME = [[('🔗 源帖映射', 'mappings:1')],
+        [('🎯 目标频道', 'target'), ('📡 监听频道', 'monitor')],
         [('🔄 手动同步', 'input:sync'), ('📦 批量转发', 'input:export')],
         [('📋 任务队列', 'queue'), ('📝 转发记录', 'history')],
-        [('🔗 同步映射', 'mappings:1')],
         [('📖 使用向导', 'help'), ('⚙️ 系统管理', 'system')]]
 BACK = [('⬅️ 返回面板', 'home')]
 PAGES = {
@@ -102,7 +102,8 @@ class AdminPanel:
         if not self.webui_url:
             return self.home, HOME
         hint = '\n\n🌐 首次使用，请点击「打开 WebUI」。登录工作台后，进入「工作台设置」，按使用需求扫码登录 Telegram 账号。'
-        return self.home + hint, [[Button.url('🌐 打开 WebUI', self.webui_url)], *HOME]
+        first_row = [Button.url('🌐 打开 WebUI', self.webui_url), *HOME[0]]
+        return self.home + hint, [first_row, *HOME[1:]]
 
     async def open(self, uid, send, *, guide=False, history=None, mappings=None):
         if not self.allowed(uid):
@@ -151,7 +152,8 @@ class AdminPanel:
     async def mappings_view(self, page):
         result = await self.bot.list_monitor_mappings(page)
         page, pages = result['page'], result['pages']
-        lines = [f"🔗 自动同步映射 · 第 {page}/{pages} 页 · 共 {result['total']} 条"]
+        lines = ['自动复制的源帖映射', '查看已确认自动复制的源帖及其对应的目标帖。点击链接可打开对应消息。',
+                 f"第 {page}/{pages} 页 · 共 {result['total']} 条"]
         for row in result['rows']:
             links = []
             for side, label in (('source', '源帖'), ('target', '目标帖')):
@@ -162,7 +164,7 @@ class AdminPanel:
                 links.append(f'{channel} {post}')
             lines.append(' → '.join(links))
         if not result['rows']:
-            lines.append('暂无已确认的自动同步映射。')
+            lines.append('暂无已确认的源帖映射。')
         navigation = []
         if page > 1:
             navigation.append(('上一页', f'mappings:{page - 1}'))
@@ -285,10 +287,7 @@ class AdminPanel:
         elif action == 'help':
             await self._screen(s, self.guide, [BACK])
         elif action == 'system':
-            rows = [[('🔄 重启机器人…', 'ask:restart')], BACK]
-            if self.webui_url:
-                rows.insert(0, [Button.url('🌐 打开 WebUI', self.webui_url)])
-            await self._screen(s, '⚙️ 系统管理', rows)
+            await self._screen(s, '⚙️ 系统管理', [[('🔄 重启机器人…', 'ask:restart')], BACK])
         elif action == 'history' or action.startswith(('hpage:', 'hdetail:')):
             text, rows = self.history_view(s, action)
             await self.bot.client.edit_message(s.owner, s.mid, text, buttons=self._keyboard(s, rows),

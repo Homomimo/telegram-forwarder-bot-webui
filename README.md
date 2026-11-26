@@ -42,7 +42,7 @@ docker logs telegram-forwarder-bot
 
 在网页设置转发目标和监听来源。也可在 Bot 中用 `/forwardto <频道ID>` 设置目标，用 `/monitor add <频道ID>` 添加来源。先在自己的测试频道验证，再用于正式频道。只转发你有权复制的内容。Bot 私聊中的 `/help` 也可以查看扫码向导。
 
-在 WebUI 的「同步映射」或 Bot 管理面板的「同步映射」查看已确认的自动同步关系。管理员也可在 Bot 私聊中发送 `/mappings [页码]`。
+在 WebUI 的「同步映射」或 Bot 管理面板的「🔗 源帖映射」查看已确认自动复制的源帖及其对应的目标帖。管理员也可在 Bot 私聊中发送 `/mappings [页码]`。
 
 ## 在 VPS 上更新
 

@@ -1057,7 +1057,7 @@ START_MESSAGE_ADMIN = """🤖 消息转发助手 · 管理面板
 /queue album <任务ID> <实际项数> — 恢复「相册未收齐」任务。先确认目标未收到，再数清源相册的 2–10 项。
 /tdlstop — 停止当前手动转发，清空等待任务和定时重试；已开始的自动同步不强停
 /flog [页码] — 分页查看保留期内全部转发记录
-/mappings [页码] — 在私聊中查看自动同步的源帖和目标帖映射
+/mappings [页码] — 在私聊中查看自动复制的源帖映射
 /flog id <记录号> — 查看消息数、目标帖和诊断
 /flog clear — 清空本地记录，不删除频道消息
 /restart — 重启机器人
@@ -1108,7 +1108,7 @@ https://t.me/channel_name/42
 /queue album <任务ID> <实际项数> — 如果源相册已发完、目标未收到，先用 /queue 查看任务 ID，再数清源相册有几项（2–10）。数量核对一致才重新入队。
 /tdlstop — 停止手动任务并清空排队、重试，不强停正在执行的自动同步
 /flog [页码] · /flog id <记录号> · /flog clear — 浏览记录、查看详情、清空本地记录
-/mappings [页码] — 在私聊中查看自动同步映射
+/mappings [页码] — 在私聊中查看自动复制的源帖映射
 /restart · /start — 重启机器人 · 返回管理面板
 
 💡 网页与 Bot 共用频道配置；集成版挂载 /data 后重启仍保留。"""
@@ -3218,7 +3218,7 @@ class TelegramBot:
 
         if command == '/mappings':
             if event.sender_id != getattr(event, 'chat_id', None):
-                await respond('请在与机器人的私聊中查看自动同步映射。')
+                await respond('请在与机器人的私聊中查看源帖映射。')
             elif len(parts) > 2 or (len(parts) == 2 and not re.fullmatch(r'[1-9][0-9]{0,8}', parts[1])):
                 await respond('用法：/mappings [页码]')
             else:

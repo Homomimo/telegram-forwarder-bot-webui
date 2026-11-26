@@ -124,7 +124,9 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.bot.channel_names[SOURCE] = '来源 <频道>'
         self.bot.monitor_message_map().remember(SOURCE, TARGET, {mid: 100 + mid for mid in range(1, 12)},
                                                 album_member=True)
-        await self.click('🔗 同步映射')
+        await self.click('🔗 源帖映射')
+        self.assertTrue(self.page.raw_text.startswith('自动复制的源帖映射\n'))
+        self.assertIn('查看已确认自动复制的源帖及其对应的目标帖。点击链接可打开对应消息。', self.page.raw_text)
         self.assertIn('第 1/2 页 · 共 11 条', self.page.raw_text)
         self.assertIn('来源 &lt;频道&gt;', self.page.raw_text)
         self.assertIn(f'href="https://t.me/c/{TARGET}/111?single"', self.page.raw_text)
@@ -137,7 +139,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('私聊', group.respond.await_args.args[0])
         self.assertNotIn('https://', group.respond.await_args.args[0])
 
-    async def test_webui_url_appears_in_configured_private_home_and_system_menu(self):
+    async def test_webui_url_only_appears_beside_source_mappings_in_configured_private_home(self):
         label = '🌐 打开 WebUI'
         panel = self.bot.admin_panel
         self.assertFalse(any(b.text == label for row in self.page.buttons for b in row))
@@ -149,20 +151,22 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         panel.webui_url = 'https://203.0.113.10:9443'
         await self.text('/start')
         markup = TelegramClient.build_reply_markup(self.page.buttons)
-        home_link, = markup.rows[0].buttons
+        home_link, mappings_button = markup.rows[0].buttons
         self.assertEqual(home_link.text, label)
         self.assertIsInstance(home_link.type, types.InlineButtonTypeUrl)
         self.assertEqual(home_link.type.url, panel.webui_url)
+        self.assertEqual(mappings_button.text, '🔗 源帖映射')
         self.assertIn('「工作台设置」，按使用需求扫码登录', self.page.raw_text)
+        await self.click('🔗 源帖映射')
+        self.assertIn('暂无已确认的源帖映射。', self.page.raw_text)
+        await self.click('⬅️ 返回面板')
         await self.click('⚙️ 系统管理')
         markup = TelegramClient.build_reply_markup(self.page.buttons)
-        links = [b for row in markup.rows for b in row.buttons if b.text == label]
-        self.assertEqual(len(links), 1)
-        self.assertIsInstance(links[0].type, types.InlineButtonTypeUrl)
-        self.assertEqual(links[0].type.url, panel.webui_url)
+        self.assertFalse(any(isinstance(b.type, types.InlineButtonTypeUrl) for row in markup.rows for b in row.buttons))
         self.assertEqual(set(self.session.choices.values()), {'ask:restart', 'home'})
         await self.click('⬅️ 返回面板')
         self.assertEqual(self.page.buttons[0][0].type.url, panel.webui_url)
+        self.assertEqual(self.page.buttons[0][1].text, '🔗 源帖映射')
         self.assertIn('扫码登录', self.page.raw_text)
 
         for uid, chat in [(UID, -90), (71, 71)]:
@@ -174,7 +178,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.page.buttons), 5)
         for label, expected in [('🎯 目标频道', str(TARGET)), ('📡 监听频道', str(SOURCE)),
                                 ('📋 任务队列', '队列为空'), ('📝 转发记录', '暂无转发'),
-                                ('🔗 同步映射', '暂无已确认的自动同步映射'),
+                                ('🔗 源帖映射', '暂无已确认的源帖映射。'),
                                 ('📖 使用向导', '①'), ('⚙️ 系统管理', '系统管理')]:
             with self.subTest(page=label):
                 if label == '📝 转发记录':
