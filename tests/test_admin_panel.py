@@ -104,7 +104,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         receipt = self.page
         await self.click('⬅️ 返回面板')
         self.assertNotIn(receipt.id, self.messages)
-        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+        self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
         old = await self.text(f'https://t.me/c/{SOURCE}/42', reply=prompt)
         self.assertIn('已失效', old.respond.await_args.args[0])
         self.bot.do_forward.assert_not_awaited()
@@ -133,7 +133,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         prompt = self.session.prompt_id
         opened = await self.text('/start', reply=prompt)
         opened.respond.assert_awaited_once()
-        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+        self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
         self.assertEqual(list(self.messages), [self.page.id])
         self.assertFalse(self.session.prompt_id)
 
@@ -265,7 +265,28 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(home_link.type, types.InlineButtonTypeUrl)
         self.assertEqual(home_link.type.url, panel.webui_url)
         self.assertEqual(mappings_button.text, '🔗 源帖映射')
-        self.assertIn('「工作台设置」，按使用需求扫码登录', self.page.raw_text)
+        self.assertEqual([[b.text for b in row.buttons] for row in markup.rows], [
+            [label, '🔗 源帖映射'],
+            ['🎯 目标频道', '📡 监听频道'],
+            ['🔄 手动同步', '📦 批量转发'],
+            ['📋 任务队列', '📝 转发记录'],
+            ['📖 使用向导', '⚙️ 系统管理'],
+        ])
+        self.assertTrue(self.page.raw_text.endswith(
+            '🌐 首次使用：点击「🌐 打开 WebUI」，登录后进入「工作台设置」，'
+            '按需扫码登录 TDL 转发账号或 Telethon 用户会话。\n\n'
+            '命令用法和扫码说明见「📖 使用向导」。'
+        ))
+        home = self.page.raw_text
+        self.assertEqual(home.count('\n• '), 3)
+        await self.click('📖 使用向导')
+        guide = self.page.raw_text
+        self.assertEqual(guide, app.HELP_MESSAGE_ADMIN)
+        for cmd in ('/showto', '/forwardto', '/channelname', '/monitor', '/resync',
+                    '/export_range', '/queue', '/tdlstop', '/flog', '/mappings', '/restart'):
+            self.assertNotIn(cmd, home)
+            self.assertIn(cmd, guide)
+        await self.click('⬅️ 返回面板')
         await self.click('🔗 源帖映射')
         self.assertIn('暂无已确认的源帖映射。', self.page.raw_text)
         await self.click('⬅️ 返回面板')
@@ -283,7 +304,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('buttons', event.respond.await_args.kwargs)
 
     async def test_home_pages_refresh_back_and_context(self):
-        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+        self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
         self.assertEqual(len(self.page.buttons), 5)
         for label, expected in [('🎯 目标频道', str(TARGET)), ('📡 监听频道', str(SOURCE)),
                                 ('📋 任务队列', '队列为空'), ('📝 转发记录', '暂无转发'),
@@ -316,7 +337,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await self.new(first)
         second = await self.text('/start')
         self.assertIs(self.page, root)
-        self.assertEqual(root.raw_text, app.START_MESSAGE_ADMIN)
+        self.assertEqual(root.raw_text, self.bot.admin_panel.home_view()[0])
         first.respond.assert_not_awaited()
         second.respond.assert_not_awaited()
         self.client.send_message.assert_awaited_once()
@@ -329,7 +350,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         event.respond.assert_awaited_once()
         self.assertNotEqual(self.session.mid, old_mid)
         self.assertNotIn(old_mid, self.messages)
-        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+        self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
 
     async def test_all_panel_commands_keep_one_message_per_admin(self):
         self.bot.forward_log.get_all.return_value = []
@@ -368,7 +389,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await restart()
         self.assertEqual(list(self.messages), [self.page.id])
         self.assertNotIn(self.page.id, (original, prompt))
-        self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
+        self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
 
     async def test_button_owner_generation_and_message_binding(self):
         key = self.button('🎯 目标频道')
