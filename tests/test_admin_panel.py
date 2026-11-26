@@ -120,6 +120,23 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         rows.clear()
         await self.click('⬅️ 返回记录'); self.assertIn('暂无转发记录', self.page.raw_text)
 
+    async def test_mappings_menu_and_command_are_private_and_paginated(self):
+        self.bot.channel_names[SOURCE] = '来源 <频道>'
+        self.bot.monitor_message_map().remember(SOURCE, TARGET, {mid: 100 + mid for mid in range(1, 12)},
+                                                album_member=True)
+        await self.click('🔗 同步映射')
+        self.assertIn('第 1/2 页 · 共 11 条', self.page.raw_text)
+        self.assertIn('来源 &lt;频道&gt;', self.page.raw_text)
+        self.assertIn(f'href="https://t.me/c/{TARGET}/111?single"', self.page.raw_text)
+        await self.click('下一页')
+        self.assertIn('第 2/2 页', self.page.raw_text)
+        self.assertIn(f'href="https://t.me/c/{SOURCE}/1?single"', self.page.raw_text)
+        await self.text('/mappings 1')
+        self.assertIn('第 1/2 页', self.page.raw_text)
+        group = await self.text('/mappings', chat=-456)
+        self.assertIn('私聊', group.respond.await_args.args[0])
+        self.assertNotIn('https://', group.respond.await_args.args[0])
+
     async def test_webui_url_only_appears_in_configured_private_system_menu(self):
         label = '🌐 打开 WebUI'
         panel = self.bot.admin_panel
@@ -145,9 +162,10 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_home_pages_refresh_back_and_context(self):
         self.assertEqual(self.page.raw_text, app.START_MESSAGE_ADMIN)
-        self.assertEqual(len(self.page.buttons), 4)
+        self.assertEqual(len(self.page.buttons), 5)
         for label, expected in [('🎯 目标频道', str(TARGET)), ('📡 监听频道', str(SOURCE)),
                                 ('📋 任务队列', '队列为空'), ('📝 转发记录', '暂无转发'),
+                                ('🔗 同步映射', '暂无已确认的自动同步映射'),
                                 ('📖 使用向导', '①'), ('⚙️ 系统管理', '系统管理')]:
             with self.subTest(page=label):
                 if label == '📝 转发记录':

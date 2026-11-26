@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from telethon import types
 
@@ -45,6 +45,38 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.bot.console_data = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    async def test_web_mappings_list_only_confirmed_pairs_and_requires_session(self):
+        from console_http import Console, Handler
+
+        bot = self.bot
+        console = Console(bot, app, bot.console_data)
+        mappings = bot.monitor_message_map()
+        mappings.remember(SOURCE, TARGET, {mid: 100 + mid for mid in range(1, 12)})
+        mappings.reserve(SOURCE, TARGET, [12])
+        page = await console.command('mappings', {'page': '1'})
+        self.assertEqual((page['total'], page['pages'], page['page']), (11, 2, 1))
+        self.assertEqual([row['source_message'] for row in page['rows']], list(range(11, 1, -1)))
+        self.assertEqual(page['rows'][0]['target_url'], f'https://t.me/c/{TARGET}/111')
+        last = await console.command('mappings', {'page': '99'})
+        self.assertEqual(last['page'], 2)
+        self.assertEqual([row['source_message'] for row in last['rows']], [1])
+        with self.assertRaisesRegex(ValueError, '页码必须是正整数'):
+            await console.command('mappings', {'page': '0'})
+
+        handler = object.__new__(Handler)
+        handler.path = '/api/mappings?page=2'
+        handler.allowed = Mock(return_value=True)
+        handler.session = Mock(return_value=None)
+        handler.reply = Mock()
+        handler.server = SimpleNamespace(console=SimpleNamespace(dispatch=Mock(return_value=last)))
+        handler.do_GET()
+        self.assertEqual(handler.reply.call_args.args[0], 401)
+        handler.server.console.dispatch.assert_not_called()
+        handler.session.return_value = 'authenticated'
+        handler.do_GET()
+        handler.server.console.dispatch.assert_called_once_with('mappings', {'page': '2'})
+        handler.reply.assert_called_with(200, last)
 
     async def test_name_shared_between_bot_and_web_without_changing_routing(self):
         from console_http import Console

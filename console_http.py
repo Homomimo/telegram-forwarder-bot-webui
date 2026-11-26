@@ -7,7 +7,7 @@ import re
 import sqlite3
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 import accounts
 from channel_input import numeric_channel, parse_reference
 import web_sessions
@@ -34,6 +34,10 @@ class Console:
 
     async def command(self, op, p):
         bot, queue = self.bot, self.bot.task_queue
+        if op == "mappings":
+            page = p.get("page", "1")
+            check(isinstance(page, str) and re.fullmatch(r"[1-9][0-9]{0,8}", page), "页码必须是正整数")
+            return await bot.list_monitor_mappings(int(page))
         if op == "state":
             history = bot.forward_log.get_recent(100)
             recent = [
@@ -235,7 +239,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed():
             return
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         if path == "/api/auth/session":
             csrf = self.session()
             return self.reply(
@@ -249,6 +254,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, self.server.console.dispatch("state"))
             except (TimeoutError, sqlite3.Error, OSError):
                 return self.reply(503, {"error": "队列暂不可用"})
+        if path == "/api/mappings":
+            pages = parse_qs(url.query, keep_blank_values=True).get("page", ["1"])
+            if len(pages) != 1:
+                return self.reply(400, {"error": "请指定一个页码"})
+            try:
+                return self.reply(200, self.server.console.dispatch("mappings", {"page": pages[0]}))
+            except ValueError as exc:
+                return self.reply(400, {"error": str(exc)})
+            except (TimeoutError, sqlite3.Error, OSError):
+                return self.reply(503, {"error": "同步映射暂不可用"})
         if path == "/health":
             return self.reply(200, {"mode": "live", "version": VERSION})
         files = {

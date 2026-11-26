@@ -5,6 +5,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from functools import partial
+from html import escape
 
 from telethon import Button, types
 from forward_records import PAGE_SIZE, history_list, history_detail
@@ -17,6 +18,7 @@ TTL = 300
 HOME = [[('🎯 目标频道', 'target'), ('📡 监听频道', 'monitor')],
         [('🔄 手动同步', 'input:sync'), ('📦 批量转发', 'input:export')],
         [('📋 任务队列', 'queue'), ('📝 转发记录', 'history')],
+        [('🔗 同步映射', 'mappings:1')],
         [('📖 使用向导', 'help'), ('⚙️ 系统管理', 'system')]]
 BACK = [('⬅️ 返回面板', 'home')]
 PAGES = {
@@ -96,17 +98,22 @@ class AdminPanel:
         session.choices = choices
         return buttons
 
-    async def open(self, uid, send, *, guide=False, history=None):
+    async def open(self, uid, send, *, guide=False, history=None, mappings=None):
         if not self.allowed(uid):
             return
         async with self._lock(uid):
             if not self.allowed(uid):
                 return
             session = Session(uid)
-            text, rows = (self.history_view(session, history) if history is not None else
-                          (self.guide, [BACK]) if guide else (self.home, HOME))
+            if mappings is not None:
+                text, rows = await self.mappings_view(mappings)
+                if not self.allowed(uid):
+                    return
+            else:
+                text, rows = (self.history_view(session, history) if history is not None else
+                              (self.guide, [BACK]) if guide else (self.home, HOME))
             msg = await send(text, link_preview=False, buttons=self._keyboard(session, rows),
-                             **({'parse_mode': 'html'} if history is not None else {}))
+                             **({'parse_mode': 'html'} if history is not None or mappings is not None else {}))
             session.root_mid = session.mid = msg.id
             if self.allowed(uid):
                 previous = self.sessions.get(uid)
@@ -134,6 +141,30 @@ class AdminPanel:
         if self.bot.forward_log.write_failed is True:
             text += '\n⚠️ 历史文件写入失败，部分记录仅在内存中。'
         return text, [*buttons, BACK]
+
+    async def mappings_view(self, page):
+        result = await self.bot.list_monitor_mappings(page)
+        page, pages = result['page'], result['pages']
+        lines = [f"🔗 自动同步映射 · 第 {page}/{pages} 页 · 共 {result['total']} 条"]
+        for row in result['rows']:
+            links = []
+            for side, label in (('source', '源帖'), ('target', '目标帖')):
+                message = row[f'{side}_message']
+                channel = escape(row[f'{side}_label'][:40])
+                url = row[f'{side}_url']
+                post = f'<a href="{url}">{label} #{message}</a>' if url else f'{label} #{message}'
+                links.append(f'{channel} {post}')
+            lines.append(' → '.join(links))
+        if not result['rows']:
+            lines.append('暂无已确认的自动同步映射。')
+        navigation = []
+        if page > 1:
+            navigation.append(('上一页', f'mappings:{page - 1}'))
+        if page < pages:
+            navigation.append(('下一页', f'mappings:{page + 1}'))
+        buttons = [navigation] if navigation else []
+        buttons.append([('🔄 刷新', f'mappings:{page}'), *BACK])
+        return '\n\n'.join(lines), buttons
 
     def _end_wait(self, s):
         if s.timer:
@@ -254,6 +285,10 @@ class AdminPanel:
             await self._screen(s, '⚙️ 系统管理', rows)
         elif action == 'history' or action.startswith(('hpage:', 'hdetail:')):
             text, rows = self.history_view(s, action)
+            await self.bot.client.edit_message(s.owner, s.mid, text, buttons=self._keyboard(s, rows),
+                                               parse_mode='html', link_preview=False)
+        elif action.startswith('mappings:'):
+            text, rows = await self.mappings_view(int(action.partition(':')[2]))
             await self.bot.client.edit_message(s.owner, s.mid, text, buttons=self._keyboard(s, rows),
                                                parse_mode='html', link_preview=False)
         elif action in PAGES:

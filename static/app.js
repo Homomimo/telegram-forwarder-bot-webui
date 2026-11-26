@@ -20,7 +20,7 @@ const paths = {
     "M3 6h8m5 0h5 M3 12h2m5 0h11 M3 18h10m5 0h3 M12 3v6 M7 9v6 M15 15v6",
 };
 function ico(k) {
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[k]}"/></svg>`;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[k === "mappings" ? "jobs" : k]}"/></svg>`;
 }
 const pair = (k, v) =>
   `<div class="pair"><span>${k}</span><span>${esc(v)}</span></div>`;
@@ -96,17 +96,23 @@ let s,
   callback,
   fetching = false,
   toastTimer;
+let mappings = null,
+  mappingError = "",
+  mappingRequest = 0;
 const pages = {
   home: "工作台",
   jobs: "任务队列",
   history: "转发记录",
+  mappings: "同步映射",
   settings: "工作台设置",
 };
 function go(k) {
+  const enteringMappings = k === "mappings" && page !== k;
   page = Object.hasOwn(pages, k) ? k : "home";
   location.hash = page;
   setNavigation(false);
   draw();
+  if (enteringMappings) loadMappings(1);
 }
 window.addEventListener("hashchange", () => {
   if (signedIn) go(location.hash.slice(1));
@@ -180,6 +186,31 @@ function draw() {
       ) + card(`待人工核对（${s.review_total}）`, review);
   } else if (page === "history") {
     body += card("最近 100 条转发记录", records(history));
+  } else if (page === "mappings") {
+    let content = mappingError ? `<p role="alert">${esc(mappingError)}</p>` : "";
+    if (mappings) {
+      const post = (channel, id, url) => {
+        const label = `消息 #${esc(id)}`;
+        const link = url
+          ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`
+          : label;
+        return `${link}<small class="cellSub">${esc(channel)}</small>`;
+      };
+      const rows = mappings.rows.map((row) => {
+        const source = post(row.source_label, row.source_message, row.source_url);
+        const target = post(row.target_label, row.target_message, row.target_url);
+        const confirmed = row.confirmed_at ? new Date(row.confirmed_at * 1000).toLocaleString() : "—";
+        return `<tr><td>${source}</td><td>${target}</td><td>${esc(confirmed)}</td></tr>`;
+      });
+      const { page: current, pages: totalPages, total } = mappings;
+      const previous = current > 1 ? btn("mappingPage", "上一页", "", current - 1) : "";
+      const next = current < totalPages ? btn("mappingPage", "下一页", "", current + 1) : "";
+      content += table(["源帖", "目标帖", "确认时间"], rows, "暂无已确认的自动同步映射。");
+      content += `<div class="actions">${previous}<span>第 ${current}/${totalPages} 页 · 共 ${total} 条</span>${next}</div>`;
+    } else if (!mappingError) {
+      content = '<p class="hint" role="status">正在读取同步映射…</p>';
+    }
+    body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1));
   } else {
     body += card(
       "目标频道",
@@ -202,6 +233,24 @@ function draw() {
   }
   $("#page").innerHTML =
     `<div class="rowhead"><div><h1>${pages[page]}</h1><div class="sub">请仅转发获授权的内容</div></div>${btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
+}
+async function loadMappings(number) {
+  const epoch = authEpoch;
+  const request = ++mappingRequest;
+  mappingError = "";
+  try {
+    const response = await fetch(`/api/mappings?page=${encodeURIComponent(number)}`, { cache: "no-store" });
+    if (epoch !== authEpoch || request !== mappingRequest) return;
+    if (response.status === 401) return loginScreen("会话已过期，请重新登录");
+    if (!response.ok) throw Error();
+    const result = await response.json();
+    if (epoch !== authEpoch || request !== mappingRequest) return;
+    mappings = result;
+  } catch {
+    if (epoch !== authEpoch || request !== mappingRequest) return;
+    mappingError = "同步映射暂不可用，请刷新重试。";
+  }
+  if (page === "mappings") draw();
 }
 async function refresh(force = false) {
   if (!signedIn || (fetching && !force)) return;
@@ -281,6 +330,7 @@ function configureChannel(isTarget) {
   );
 }
 const handlers = {
+  mappingPage: (id) => loadMappings(id),
   new: () => newTask(),
   target: () => configureChannel(true),
   rename: (id) => {
@@ -510,6 +560,9 @@ function loginScreen(message = "") {
   authEpoch++;
   csrf = "";
   s = null;
+  page = "home";
+  mappings = null;
+  mappingError = "";
   setNavigation(false);
   if ($("#dlg").open) $("#dlg").close();
   $("#workspace").hidden = true;
