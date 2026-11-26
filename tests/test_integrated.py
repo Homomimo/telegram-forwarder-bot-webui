@@ -48,6 +48,59 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         await super().asyncSetUp()
         self.bot.console_data = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
+    async def test_bot_link_http_redemption_and_qr_requests_require_valid_session(self):
+        from console_http import Console, Handler
+        from web_sessions import COOKIE, LINK_TTL, WebSessions
+
+        clock = Mock(return_value=1)
+        sessions = WebSessions(clock)
+        handler = object.__new__(Handler)
+        handler.allowed = Mock(return_value=True)
+        handler.reply = Mock()
+        handler.server = SimpleNamespace(console=Console(self.bot, app, self.bot.console_data))
+        self.bot.tdl.tdl_path = '/test/tdl'
+
+        def post(path, payload, *, token=None, csrf=None):
+            handler.path = path
+            body = json.dumps(payload).encode()
+            handler.rfile = BytesIO(body)
+            handler.headers = Message()
+            handler.headers['Host'] = '203.0.113.10:8765'
+            handler.headers['Content-Type'] = 'application/json'
+            handler.headers['Content-Length'] = str(len(body))
+            handler.headers['X-Relay-Request'] = '1'
+            if token:
+                handler.headers['Cookie'] = f'{COOKIE}={token}'
+            if csrf:
+                handler.headers['X-CSRF-Token'] = csrf
+            handler.do_POST()
+            return handler.reply.call_args
+
+        with patch('console_http.SESSIONS', sessions), patch.object(app, 'ADMIN_IDS', [61]):
+            self.assertEqual(post('/api/auth/login', {'username': 'admin', 'password': 'old'}).args[0], 401)
+            old = sessions.issue_link(61)
+            code = sessions.issue_link(61)
+            self.assertEqual(post('/api/auth/bot-link', {'code': old}).args[0], 401)
+            self.assertEqual(post('/api/auth/bot-link', {'code': sessions.issue_link(72)}).args[0], 401)
+            redeemed = post('/api/auth/bot-link', {'code': code})
+            self.assertEqual(redeemed.args[0], 200)
+            cookie = redeemed.kwargs['cookie']
+            self.assertIn('HttpOnly; SameSite=Strict; Secure', cookie)
+            token = cookie.split('=', 1)[1].split(';')[0]
+            csrf = redeemed.args[1]['csrf']
+            self.assertEqual(post('/api/auth/bot-link', {'code': code}).args[0], 401)
+            for account in ('tdl', 'telethon'):
+                with patch('console_http.accounts.manager.command', return_value={'ok': True}) as qr:
+                    self.assertEqual(post('/api/login/start', {'provider': account}).args[0], 401)
+                    self.assertEqual(post('/api/login/start', {'provider': account}, token=token).args[0], 403)
+                    self.assertEqual(post('/api/login/start', {'provider': account}, token=token, csrf=csrf).args[0], 200)
+                    qr.assert_called_once_with('start', {'provider': account}, self.bot.console_data, '/test/tdl')
+            expiring = sessions.issue_link(61)
+            clock.return_value += LINK_TTL
+            self.assertEqual(post('/api/auth/bot-link', {'code': expiring}).args[0], 401)
+            self.assertEqual(post('/api/auth/logout', {}, token=token, csrf=csrf).args[0], 200)
+            self.assertEqual(post('/api/login/start', {'kind': 'tdl'}, token=token, csrf=csrf).args[0], 401)
+
     async def test_web_mappings_list_only_confirmed_pairs_and_requires_session(self):
         from console_http import Console, Handler
 

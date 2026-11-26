@@ -9,6 +9,7 @@ from html import escape
 
 from telethon import Button, errors, types
 from forward_records import PAGE_SIZE, history_list, history_detail
+from web_sessions import LINK_TTL, SESSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +106,9 @@ class AdminPanel:
         guide_hint = '\n\n命令用法和扫码说明见「📖 使用向导」。'
         if not self.webui_url:
             return self.home + guide_hint, HOME
-        hint = ('\n\n🌐 首次使用：点击「🌐 打开 WebUI」，登录后进入「工作台设置」，'
+        hint = ('\n\n🌐 首次使用：点击「🌐 打开 WebUI」获取一次性登录链接，打开后进入「工作台设置」，'
                 '按需扫码登录 TDL 转发账号或 Telethon 用户会话。')
-        first_row = [Button.url('🌐 打开 WebUI', self.webui_url), *HOME[0]]
+        first_row = [('🌐 打开 WebUI', 'webui'), *HOME[0]]
         return self.home + hint + guide_hint, [first_row, *HOME[1:]]
 
     async def open(self, uid, send, *, guide=False, history=None, mappings=None):
@@ -282,6 +283,9 @@ class AdminPanel:
                     await self._remove_old_keyboard(event)
                 return
             action = s.choices[event.data]
+            if action == 'webui':
+                await self._send_webui_link(s, event)
+                return
             # A failed navigation can keep its previous keyboard. Execution must never be replayed.
             previous = replace(s) if not s.command and action != 'confirm' else None
             s.choices = {}
@@ -314,6 +318,25 @@ class AdminPanel:
                         logger.warning('未能发送面板切换失败提示', exc_info=True)
                 else:
                     await self._unavailable(s)
+
+    async def _send_webui_link(self, s, event):
+        if not self.webui_url:
+            await event.answer('WebUI 尚未配置。', alert=True)
+            return
+        await event.answer('正在生成一次性登录链接…')
+        if not self.allowed(s.owner):
+            return
+        url = f'{self.webui_url}/#login={SESSIONS.issue_link(s.owner)}'
+        try:
+            message = await event.respond(
+                '🌐 WebUI 登录链接\n\n2 分钟内可使用一次。过期后请从首页重新获取。',
+                buttons=[[Button.url('进入 WebUI', url)]], link_preview=False, parse_mode=None,
+            )
+        except Exception:
+            logger.warning('WebUI 登录链接发送失败')
+            await self._error_notice(event.respond, '登录链接未能发出，请重新点击「打开 WebUI」。')
+            return
+        self.bot.schedule_delete(message, LINK_TTL)
 
     async def _remove_old_keyboard(self, event):
         # Pre-upgrade panels lack a stored message ID. A click identifies the exact message.

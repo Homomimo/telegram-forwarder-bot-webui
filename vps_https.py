@@ -8,9 +8,7 @@ import tempfile
 from pathlib import Path
 
 
-def validate_ip(value, password):
-    if len(password) < 16:
-        raise ValueError("VPS 访问需要至少 16 位的管理员密码")
+def validate_ip(value):
     try:
         address = ipaddress.IPv4Address(value)
     except ValueError as exc:

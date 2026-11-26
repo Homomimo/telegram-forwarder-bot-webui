@@ -5,7 +5,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import secrets
 import signal
 import ssl
 import hashlib
@@ -109,18 +108,6 @@ async def serve(data):
         level=core.logging.INFO, format="%(levelname)s %(message)s"
     )
     core.logging.getLogger("telethon").setLevel(core.logging.WARNING)
-    password_file = data / "web-password.json"
-    password = os.environ.get("RELAY_PASSWORD")
-    if password is None:
-        if not password_file.exists():
-            accounts.private_write(password_file, secrets.token_urlsafe(24))
-        password = json.loads(password_file.read_text("utf-8"))
-    if (
-        not isinstance(password, str)
-        or len(password) < 16
-        or not password.isprintable()
-    ):
-        raise SystemExit("网页密码至少 16 个可打印字符")
     bot = core.TelegramBot()
     bot.console_data = data
     cfg = data / "channels.json"
@@ -148,7 +135,7 @@ async def serve(data):
     ip = os.getenv("RELAY_VPS_IP")
     if not ip:
         raise SystemExit("必须填写 RELAY_VPS_IP 并使用 HTTPS")
-    ip = vps_https.validate_ip(ip, password)
+    ip = vps_https.validate_ip(ip)
     try:
         public_port = int(os.environ.get("WEB_PORT", addr[1]))
     except ValueError:
@@ -159,10 +146,7 @@ async def serve(data):
     server = vps_https.IPHTTPSServer(addr, Handler, ip, vps_https.tls_context(data, ip))
     cert = (data / "tls" / ip / "cert.pem").read_text("ascii")
     print("HTTPS SHA256:", hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest(), flush=True)
-    server.console, server.password = Console(bot, core, data), password
-    print("[live] Web 管理员: admin", flush=True)
-    if os.getenv("RELAY_LOG_PASSWORD", "1") == "1":
-        print("Web password:", password, flush=True)
+    server.console = Console(bot, core, data)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

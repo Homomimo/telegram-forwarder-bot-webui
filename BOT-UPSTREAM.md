@@ -15,7 +15,9 @@
 
 按 README [一键启动](README.md#一键启动)运行容器。镜像已内置 TDL，无需在宿主机安装。已有部署请看[在 VPS 上更新](README.md#在-vps-上更新)。
 
-用 `ADMIN_IDS` 中的账号私聊机器人，发送 `/start` 后点击首页第一行的「🌐 打开 WebUI」。使用 Web 管理员账号登录，进入「工作台设置」。在所需账号的卡片上点「扫码登录」，再点「生成二维码」并用 Telegram 扫码。
+用 `ADMIN_IDS` 中的账号私聊机器人，发送 `/start` 后点击首页第一行的「🌐 打开 WebUI」。打开 Bot 发来的一次性登录链接即可进入工作台。链接 2 分钟内可用一次，失效后可回 Bot 重新获取。没有有效会话时，直接访问网页会提示「请从 Telegram Bot 打开」。
+
+进入「工作台设置」后，在所需账号的卡片上点「扫码登录」，再点「生成二维码」并用 Telegram 扫码。
 
 - **TDL 转发账号**用于读取源帖、核对相册，并在需要 TDL 时发布。手动无引用转发、批量转发，或自动复制遇到禁转并通过 TDL 重新发布时，需要扫码登录。
 - **Telethon 用户会话**用于以个人 Telegram 账号监听源频道。如果 Bot 已能收到所需频道的更新，可以跳过。首次登录默认使用容器的 `API_ID` 和 `API_HASH`。
@@ -33,7 +35,7 @@
 | `[启动/队列]` | 本次恢复了多少立即任务、定时重试、等待编辑映射及待人工核对的记录；空队列也会显示零。 |
 | `[启动/就绪]` | 启动流程已完成，显示实际监听客户端、同步状态、管理员面板送达数及耗时。**不代表已经验证频道读写权限。** |
 
-若没有就绪日志，先用 `docker ps -a --filter name=telegram-forwarder-bot` 查看容器状态，再用 `docker logs --tail 100 telegram-forwarder-bot` 定位最后一个启动阶段。日志可能含 Web 管理员密码，不要公开原文。
+若没有就绪日志，先用 `docker ps -a --filter name=telegram-forwarder-bot` 查看容器状态，再用 `docker logs --tail 100 telegram-forwarder-bot` 定位最后一个启动阶段。
 
 </details>
 
@@ -140,7 +142,7 @@
 | `message_map.sqlite3` | 源帖与目标帖的映射、投递去重记录 |
 | `message_map.sqlite3.queue.sqlite3` | 等待、重试及待核对任务 |
 | `accounts/` | TDL 与 Telethon 账号会话 |
-| `tls/`、`web-password.json` | HTTPS 证书和私钥、默认生成的 Web 登录密码 |
+| `tls/` | HTTPS 证书和私钥 |
 
 手动备份前先确认队列空闲，再用 `docker stop telegram-forwarder-bot` 停止容器，以 root 备份整个数据目录，完成后用 `docker start telegram-forwarder-bot` 恢复。备份含登录凭据，不要公开或覆盖唯一的旧备份。镜像更新使用 [VPS 更新脚本](README.md#在-vps-上更新)。
 

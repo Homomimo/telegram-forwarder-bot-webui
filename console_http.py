@@ -14,7 +14,7 @@ import web_sessions
 
 ROOT = Path(__file__).resolve().parent
 VERSION = (ROOT / "VERSION").read_text("ascii").strip()
-SESSIONS = web_sessions.WebSessions()
+SESSIONS = web_sessions.SESSIONS
 
 
 def check(ok, message):
@@ -233,7 +233,7 @@ class Handler(BaseHTTPRequestHandler):
         return web_sessions.cookie_token(self.headers.get("Cookie"))
 
     def session(self):
-        return SESSIONS.csrf(self.token())
+        return SESSIONS.csrf(self.token(), self.server.console.bot.admin_panel.allowed)
 
     def make_cookie(self, token, age=None):
         value = f"{web_sessions.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Secure"
@@ -300,34 +300,14 @@ class Handler(BaseHTTPRequestHandler):
             check(0 < n <= 8192, "请求大小不合法")
             p = json.loads(self.rfile.read(n))
             check(isinstance(p, dict), "请求格式不正确")
-            if self.path == "/api/auth/login":
-                check(
-                    isinstance(p.get("username"), str)
-                    and isinstance(p.get("password"), str),
-                    "请输入账号和密码",
-                )
-                status, token, csrf = SESSIONS.login(
-                    self.client_address[0],
-                    p["username"],
-                    p["password"],
-                    self.server.password,
-                )
-                if status != 200:
-                    return self.reply(
-                        status,
-                        {
-                            "error": "尝试过多，请 5 分钟后再试"
-                            if status == 429
-                            else "账号或密码不正确"
-                        },
-                    )
-                return self.reply(
-                    200,
-                    {"csrf": csrf},
-                    cookie=self.make_cookie(
-                        token, web_sessions.TTL if p.get("remember") is True else None
-                    ),
-                )
+            if self.path == "/api/auth/bot-link":
+                code = p.get("code")
+                token, csrf = (SESSIONS.redeem(code, self.server.console.bot.admin_panel.allowed)
+                               if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", code)
+                               else (None, None))
+                if not token:
+                    return self.reply(401, {"error": "登录链接已失效，请回 Bot 获取新链接。"})
+                return self.reply(200, {"csrf": csrf}, cookie=self.make_cookie(token))
             csrf = self.session()
             if csrf is None:
                 return self.reply(401, {"error": "请重新登录工作台"})
@@ -339,10 +319,6 @@ class Handler(BaseHTTPRequestHandler):
                 SESSIONS.revoke(self.token())
                 return self.reply(200, {"ok": True}, cookie=self.make_cookie("", 0))
             if self.path.startswith("/api/login/"):
-                check(
-                    len(self.server.password) >= 16,
-                    "网页密码至少需要 16 位",
-                )
                 return self.reply(
                     200,
                     accounts.manager.command(

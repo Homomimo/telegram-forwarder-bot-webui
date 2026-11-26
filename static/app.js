@@ -585,16 +585,11 @@ function loginScreen(message = "") {
   $("#gate").hidden = false;
   $("#page").replaceChildren();
   $("#nav").replaceChildren();
-  $("#pwd").value = "";
-  $("#pwd").type = "password";
-  $("#see").textContent = "显示";
-  $("#see").setAttribute("aria-pressed", "false");
   $("#loginerr").textContent = message;
 }
 async function enter() {
   signedIn = true;
   authEpoch++;
-  $("#pwd").value = "";
   $("#gate").hidden = true;
   $("#workspace").hidden = false;
   go(location.hash.slice(1));
@@ -602,6 +597,19 @@ async function enter() {
 }
 async function boot() {
   try {
+    if (location.hash.startsWith("#login=")) {
+      const code = location.hash.slice("#login=".length);
+      history.replaceState(null, "", location.pathname + location.search);
+      const response = await fetch("/api/auth/bot-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Relay-Request": "1" },
+        body: JSON.stringify({ code }),
+      });
+      if (response.status === 401) return loginScreen("登录链接已失效，请回 Bot 获取新链接。");
+      if (!response.ok) throw Error();
+      csrf = (await response.json()).csrf;
+      return await enter();
+    }
     const r = await fetch("/api/auth/session", { cache: "no-store" });
     if (!r.ok) throw Error();
     const v = await r.json();
@@ -612,40 +620,6 @@ async function boot() {
     loginScreen("无法连接服务器，请检查连接后重试。");
   }
 }
-$("#signin").onsubmit = async (e) => {
-  e.preventDefault();
-  const b = e.submitter || $("#signin .enter");
-  b.disabled = true;
-  try {
-    const r = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Relay-Request": "1" },
-      body: JSON.stringify({
-        username: $("#uname").value.trim(),
-        password: $("#pwd").value,
-        remember: $("#keep").checked,
-      }),
-    });
-    const v = await r.json();
-    if (!r.ok) throw Error(v.error || "登录失败");
-    csrf = v.csrf;
-    await enter();
-  } catch (err) {
-    $("#loginerr").textContent = err.message;
-  } finally {
-    b.disabled = false;
-  }
-};
-$("#see").onclick = () => {
-  const show = $("#pwd").type === "password";
-  $("#pwd").type = show ? "text" : "password";
-  $("#see").textContent = show ? "隐藏" : "显示";
-  $("#see").setAttribute("aria-pressed", String(show));
-};
-$("#forgot").onclick = () => {
-  $("#loginerr").textContent =
-    "通过已信任的 SSH 运行 docker logs 容器名，查找 Web password。";
-};
 $("#out").onclick = async () => {
   try {
     if (loginTicket) {

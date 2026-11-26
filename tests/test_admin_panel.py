@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from telethon import TelegramClient, events, types
 from bot_fixture import app, FakeClient, SOURCE, TARGET
+from web_sessions import WebSessions
 
 UID = 61
 
@@ -262,8 +263,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         markup = TelegramClient.build_reply_markup(self.page.buttons)
         home_link, mappings_button = markup.rows[0].buttons
         self.assertEqual(home_link.text, label)
-        self.assertIsInstance(home_link.type, types.InlineButtonTypeUrl)
-        self.assertEqual(home_link.type.url, panel.webui_url)
+        self.assertIsInstance(home_link.type, types.InlineButtonTypeCallback)
         self.assertEqual(mappings_button.text, '🔗 源帖映射')
         self.assertEqual([[b.text for b in row.buttons] for row in markup.rows], [
             [label, '🔗 源帖映射'],
@@ -273,7 +273,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
             ['📖 使用向导', '⚙️ 系统管理'],
         ])
         self.assertTrue(self.page.raw_text.endswith(
-            '🌐 首次使用：点击「🌐 打开 WebUI」，登录后进入「工作台设置」，'
+            '🌐 首次使用：点击「🌐 打开 WebUI」获取一次性登录链接，打开后进入「工作台设置」，'
             '按需扫码登录 TDL 转发账号或 Telethon 用户会话。\n\n'
             '命令用法和扫码说明见「📖 使用向导」。'
         ))
@@ -295,13 +295,35 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(isinstance(b.type, types.InlineButtonTypeUrl) for row in markup.rows for b in row.buttons))
         self.assertEqual(set(self.session.choices.values()), {'ask:restart', 'home'})
         await self.click('⬅️ 返回面板')
-        self.assertEqual(self.page.buttons[0][0].type.url, panel.webui_url)
+        self.assertEqual(self.page.buttons[0][0].text, label)
         self.assertEqual(self.page.buttons[0][1].text, '🔗 源帖映射')
         self.assertIn('扫码登录', self.page.raw_text)
 
         for uid, chat in [(UID, -90), (71, 71)]:
             event = await self.text('/start', uid=uid, chat=chat)
             self.assertNotIn('buttons', event.respond.await_args.kwargs)
+
+    async def test_webui_link_is_issued_only_from_admin_private_current_panel(self):
+        panel = self.bot.admin_panel
+        panel.webui_url = 'https://203.0.113.10:9443'
+        await self.text('/start')
+        root = self.page.id
+        key = self.button('🌐 打开 WebUI')
+        sessions = WebSessions()
+        with patch('admin_panel.SESSIONS', sessions):
+            for kwargs in (dict(uid=71, chat=71), dict(chat=-90), dict(mid=root + 100)):
+                event = await self.hit(key, **kwargs)
+                event.respond.assert_not_awaited()
+            self.assertFalse(sessions.links)
+            event = await self.click('🌐 打开 WebUI')
+            event.respond.assert_awaited_once()
+            url = event.respond.await_args.kwargs['buttons'][0][0].type.url
+            self.assertTrue(url.startswith(panel.webui_url + '/#login='))
+            code = url.split('#login=')[1]
+            self.assertEqual(self.page.id, root)
+            self.assertEqual(self.button('🌐 打开 WebUI'), key)
+            self.assertTrue(sessions.redeem(code, panel.allowed)[0])
+            self.assertEqual(sessions.redeem(code, panel.allowed), (None, None))
 
     async def test_home_pages_refresh_back_and_context(self):
         self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])

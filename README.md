@@ -21,13 +21,13 @@ docker run -d --init --restart unless-stopped \
   ghcr.io/homomimo/telegram-forwarder-bot-webui:latest
 ```
 
-Docker 会自动拉取镜像并启动。查看登录密码：
+Docker 会自动拉取镜像并启动。管理员在 Bot 私聊中发送 `/start`，点击首页第一行的「🌐 打开 WebUI」，再打开 Bot 发来的一次性登录链接。链接 2 分钟内可用一次。链接失效时，回 Bot 点击同一个按钮获取新链接。没有有效会话时，直接访问 WebUI 会显示「请从 Telegram Bot 打开」。
+
+首次访问时，用下面的命令查看 `HTTPS SHA256`，并与浏览器显示的证书指纹核对。
 
 ```bash
-docker logs telegram-forwarder-bot
+docker logs telegram-forwarder-bot 2>&1 | grep -F 'HTTPS SHA256:'
 ```
-
-管理员在 Bot 私聊中发送 `/start`，点击首页第一行的「🌐 打开 WebUI」，也可以在浏览器直接访问 `https://你的VPS公网IPv4:8765`。首次访问时，核对浏览器证书指纹与日志中的 `HTTPS SHA256`，再使用用户名 `admin` 和日志中的 `Web password` 登录。
 
 若把宿主机端口改为例如 `9443`，请在 `docker run` 中同时使用 `-p 9443:8765` 和 `-e WEB_PORT=9443`，并在安全组放行对应端口。
 
@@ -54,9 +54,9 @@ docker logs telegram-forwarder-bot
 curl -fsSL https://raw.githubusercontent.com/Homomimo/telegram-forwarder-bot-webui/main/update.sh -o /root/telegram-forwarder/update.sh && sh /root/telegram-forwarder/update.sh
 ```
 
-脚本拉取 `latest`；镜像没变就不停机。有更新时先停机备份 `/data` 到 `/root/telegram-forwarder/backups/`，再用原凭据、端口和挂载启动新容器。看到「更新成功」表示已收到 Bot 就绪日志，且容器内的 WebUI 检查通过。可再发送 `/start` 并打开 WebUI，验证外部访问。
+脚本拉取 `latest`；镜像没变就不停机。有更新时先停机备份 `/data` 到 `/root/telegram-forwarder/backups/`，再沿用原容器配置启动。看到「更新成功」后，在 Bot 私聊发送 `/start`，点击「🌐 打开 WebUI」并打开新发来的一次性链接，验证外部访问。
 
-若更新失败，脚本会尝试恢复旧容器。若 VPS 断电或回退失败，先用 `docker ps -a` 检查 `.previous`、`.next` 和正式容器，确认数据目录完整后再手动启动。备份含账号会话与密码，请妥善保管，按需清理。
+若更新失败，脚本会尝试恢复旧容器。若 VPS 断电或回退失败，先用 `docker ps -a` 检查 `.previous`、`.next` 和正式容器，确认数据目录完整后再手动启动。备份含账号会话和 HTTPS 私钥，请妥善保管，按需清理。
 
 ## 注意事项
 
