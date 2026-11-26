@@ -24,7 +24,7 @@ HOME = [[('🔗 源帖映射', 'mappings:1')],
 BACK = [('⬅️ 返回面板', 'home')]
 PAGES = {
     'target': ('/showto', [[('✏️ 更换目标', 'input:target')]]),
-    'monitor': ('/monitor', [[('➕ 添加', 'input:add'), ('➖ 点选移除', 'remove:0')],
+    'monitor': ('/monitor', [[('🔀 频道配对', 'pairs:1')], [('➕ 添加', 'input:add'), ('➖ 点选移除', 'remove:0')],
                              [('替换整个列表', 'input:set'), ('清空监听…', 'ask:monclear')]]),
     'queue': ('/queue', [[('⏹ 停止任务…', 'ask:stop'), ('✅ 清空待核对…', 'ask:reviewclear')]]),
 }
@@ -35,6 +35,8 @@ QUESTIONS = {
     'target': '请回复目标频道的 ID、@用户名或 t.me 链接。',
     'add': '请回复监听频道的 ID、@用户名或 t.me 链接。',
     'set': '请回复完整的新列表，用逗号分隔频道 ID、@用户名或 t.me 链接（这将替换旧列表）。',
+    'pair-add': '请回复两个频道，用逗号分隔，顺序为「源频道,目标频道」。支持 ID、@用户名和 t.me 链接。',
+    'pair-edit': '请回复新的目标频道 ID、@用户名或 t.me 链接。',
 }
 DANGERS = {
     'reviewclear': (('/queue', 'done', 'all'), '从列表移除全部待核对记录。不会删除频道消息，也不会重新发送。'),
@@ -61,6 +63,8 @@ class Session:
     command: tuple[str, ...] = ()
     guard: object = None
     expires: float = 0
+    pair_revision: int = 0
+    pair_source: int | None = None
 
     @property
     def prompt_id(self):
@@ -378,6 +382,8 @@ class AdminPanel:
         elif action.startswith('mappings:'):
             text, rows = await self.mappings_view(int(action.partition(':')[2]))
             await self._screen(s, text, rows, parse_mode='html')
+        elif action.startswith(('pairs:', 'pair:')):
+            await self._pairs(s, action)
         elif action in PAGES or action == 'target:refresh':
             page = action.removesuffix(':refresh')
             cmd, options = PAGES[page]
@@ -385,7 +391,8 @@ class AdminPanel:
                 if page in ('monitor', 'target'):
                     text += '\n\n更改备注：/channelname <频道 ID> <备注>'
                 refresh = 'target:refresh' if page == 'target' else page
-                await self._screen(s, text, [*options, [('🔄 刷新', refresh), *BACK]], replace=action == 'target')
+                controls = options[:1] if page == 'monitor' and self.bot.strict_pairs else options
+                await self._screen(s, text, [*controls, [('🔄 刷新', refresh), *BACK]], replace=action == 'target')
             await self.bot.run_admin_action(event, [cmd], display)
         elif action.startswith('remove:'):
             ids = self.bot.monitor_chat_ids
@@ -406,13 +413,70 @@ class AdminPanel:
             await self._confirm(s, cmd, warning)
         elif action.startswith('input:'):
             stage = action.split(':')[1]
-            if stage in ('sync', 'export') and self.bot.target_chat_id is None:
+            if (stage == 'export' or (stage == 'sync' and not self.bot.strict_pairs)) and self.bot.target_chat_id is None:
                 await self._result(s, '❌ 请先在「目标频道」设置接收频道。')
                 return
-            s.guard = self.bot.target_chat_id if stage in ('sync', 'export') else None
+            s.guard = self._snapshot(('/resync',)) if stage == 'sync' else self.bot.target_chat_id if stage == 'export' else None
             await self._prompt(s, stage)
 
+    async def _pairs(self, s, action):
+        _, verb, *args = action.split(':')
+        state = self.bot.pairing_state()
+        back = [('⬅️ 返回配对', 'pairs:1')]
+        if action.startswith('pairs:'):
+            page = max(1, min(int(verb), (len(state['rows']) + 5) // 6))
+            mode = '严格一对一已启用' if state['strict'] else '准备切换 · 自动复制仍使用旧版目标'
+            lines = ['🔀 频道配对', mode]
+            if not state['strict'] and state['missing']:
+                lines.append(f"还有 {len(state['missing'])} 个现有监听源需要启用配对。")
+            if not state['rows']:
+                lines.append('尚未配置频道配对。')
+            rows = []
+            for row in state['rows'][(page - 1) * 6:page * 6]:
+                src, dst = int(row['source']), int(row['target'])
+                status = '启用' if row['enabled'] else '暂停'
+                rows.append([(f'{self.bot.channel_label(src)[:26]} → {self.bot.channel_label(dst)[:26]} · {status}', f'pair:view:{src}')])
+            nav = []
+            if page > 1:
+                nav.append(('上一页', f'pairs:{page - 1}'))
+            if page * 6 < len(state['rows']):
+                nav.append(('下一页', f'pairs:{page + 1}'))
+            if nav:
+                rows.append(nav)
+            rows.append([('➕ 新增配对', 'pair:add')])
+            if not state['strict'] and not state['missing'] and any(row['enabled'] for row in state['rows']):
+                rows.append([('启用严格一对一…', 'pair:activate')])
+            s.pair_revision = state['revision']
+            await self._screen(s, '\n\n'.join(lines), [*rows, [('⬅️ 返回监听', 'monitor'), *BACK]])
+            return
+
+        source = int(args[0]) if args else None
+        pair = self.bot.channel_pairs.get(source)
+        if verb == 'view' and pair:
+            target, enabled, _ = pair
+            s.pair_revision = state['revision']
+            text = f'🔀 频道配对\n\n{self.bot.channel_label(source)} → {self.bot.channel_label(target)}\n'
+            text += '状态：启用' if enabled else '状态：暂停'
+            await self._screen(s, text, [[('✏️ 更改目标', f'pair:edit:{source}')],
+                                          [('暂停…' if enabled else '恢复…', f'pair:toggle:{source}'),
+                                           ('🗑 删除…', f'pair:delete:{source}')], back])
+        elif s.pair_revision != state['revision'] or (source is not None and not pair):
+            await self._screen(s, '频道配对已改变，请刷新后重试。', [back])
+        elif verb in ('add', 'edit'):
+            s.pair_source = source
+            await self._prompt(s, f'pair-{verb}')
+        elif verb == 'activate':
+            await self._confirm(s, ('pairs', verb), '启用严格一对一自动复制。手动和批量转发继续使用默认目标，已入队任务保留原目标。')
+        elif pair and verb in ('toggle', 'delete'):
+            label = '暂停' if pair[1] else '恢复'
+            if verb == 'delete':
+                label = '删除'
+            await self._confirm(s, ('pairs', verb, str(source)),
+                                f'{label}配对：{self.bot.channel_label(source)} → {self.bot.channel_label(pair[0])}。')
+
     def _snapshot(self, cmd):
+        if cmd[0] == 'pairs' or (cmd[0] == '/resync' and self.bot.strict_pairs):
+            return ('pairs', self.bot.pairing_revision)
         if cmd[0] in ('/forwardto', '/export_range', '/resync'):
             return self.bot.target_chat_id
         if cmd[0] == '/monitor':
@@ -422,7 +486,9 @@ class AdminPanel:
     async def _prompt(self, s, stage, *, reply_to=None):
         s.stage = stage
         text = PROMPT + QUESTIONS[stage] + '\n5 分钟内有效；回复「取消」可退出。'
-        if stage in ('sync', 'export', 'end'):
+        if stage == 'sync' and self.bot.strict_pairs:
+            text += '\n目标按源频道配对自动选择。'
+        elif stage in ('sync', 'export', 'end'):
             text += f'\n当前目标：{s.guard}'
         prompt = await self.bot.client.send_message(s.owner, text, buttons=Button.force_reply(single_use=True),
                                                     link_preview=False, reply_to=reply_to)
@@ -495,10 +561,35 @@ class AdminPanel:
         if value == '取消':
             await result('已取消。', receipt_kind='command')
             return
-        if stage in ('sync', 'export', 'end') and self.bot.target_chat_id != s.guard:
+        if ((stage == 'sync' and self._snapshot(('/resync',)) != s.guard)
+                or (stage in ('export', 'end') and self.bot.target_chat_id != s.guard)):
             await result('目标频道已改变，请重新开始。')
             return
-        if stage == 'sync':
+        if stage in ('pair-add', 'pair-edit'):
+            action = stage.removeprefix('pair-')
+            try:
+                if action == 'add':
+                    values = value.replace('，', ',').split(',')
+                    if len(values) != 2:
+                        raise ValueError('请用逗号分隔源频道和目标频道。')
+                    source, source_title = await self.bot.resolve_channel(values[0])
+                    target_value = values[1]
+                else:
+                    source, source_title, target_value = s.pair_source, '', value
+                target, target_title = await self.bot.resolve_channel(target_value)
+            except ValueError as exc:
+                await result(f'❌ {exc}')
+                return
+            if s.pair_revision != self.bot.pairing_revision:
+                await result('频道配对已改变，请重新开始。')
+                return
+            source_label = f'{source_title}（{source}）' if source_title else self.bot.channel_label(source)
+            target_label = f'{target_title}（{target}）' if target_title else self.bot.channel_label(target)
+            label = '新增配对' if action == 'add' else '更改配对'
+            await self._confirm(s, ('pairs', action, str(source), str(target)),
+                                f'{label}：{source_label} → {target_label}。'
+                                '\n请核对频道，Bot 尚未验证读写权限。', event=event)
+        elif stage == 'sync':
             if self._is_post(value):
                 await self._execute(s, event, ('/resync', value), s.guard, result)
             else:
@@ -589,6 +680,14 @@ class AdminPanel:
             await result('配置已改变或操作已失效。未执行，请重新开始。')
             return
         s.command, s.expires = (), 0
+        if cmd[0] == 'pairs':
+            try:
+                self.bot.change_channel_pair(cmd[1], *(int(cid) for cid in cmd[2:]), expected=guard[1])
+            except ValueError as exc:
+                await result(f'❌ {exc}')
+            else:
+                await result('✅ 频道配对已更新。')
+            return
         if cmd == ('clear_mappings',):
             try:
                 removed = await self.bot.clear_monitor_mappings()

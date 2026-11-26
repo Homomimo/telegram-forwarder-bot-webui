@@ -249,6 +249,34 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('暂无已确认的源帖映射', self.page.raw_text)
         self.assertNotIn('ask:mapclear', self.session.choices.values())
 
+    async def test_bot_can_add_activate_and_pause_channel_pair(self):
+        await self.click('📡 监听频道')
+        await self.click('🔀 频道配对')
+        self.assertIn('准备切换', self.page.raw_text)
+        self.assertNotIn('pair:activate', self.session.choices.values())
+        await self.click('➕ 新增配对')
+        destination = TARGET + 1
+        await self.reply(f'{SOURCE}，{destination}')
+        self.assertIn(f'{SOURCE} → {destination}', self.page.raw_text)
+        self.assertFalse(self.bot.channel_pairs)
+        await self.click('确认执行')
+        self.assertEqual(self.bot.automatic_target(SOURCE), TARGET)
+        await self.click('⬅️ 返回面板')
+        await self.click('📡 监听频道')
+        await self.click('🔀 频道配对')
+        await self.click('启用严格一对一…')
+        await self.click('确认执行')
+        self.assertEqual(self.bot.automatic_target(SOURCE), destination)
+        await self.click('⬅️ 返回面板')
+        await self.click('📡 监听频道')
+        self.assertNotIn('input:add', self.session.choices.values())
+        await self.click('🔀 频道配对')
+        await self.click(f'{SOURCE} → {destination} · 启用')
+        await self.click('暂停…')
+        await self.click('确认执行')
+        self.assertIsNone(self.bot.automatic_target(SOURCE))
+        self.assertEqual(self.bot.target_chat_id, TARGET)
+
     async def test_webui_url_only_appears_beside_source_mappings_in_configured_private_home(self):
         label = '🌐 打开 WebUI'
         panel = self.bot.admin_panel

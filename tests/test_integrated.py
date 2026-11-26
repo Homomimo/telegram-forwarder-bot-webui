@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -47,6 +48,93 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.bot.console_data = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    async def test_channel_pairs_stage_activate_and_keep_manual_default_and_queued_targets(self):
+        from console_http import Console
+
+        bot = self.bot
+        bot.task_queue.running = True
+        secondary, first_target, second_target = SOURCE + 1, TARGET + 1, TARGET + 2
+        default = bot.target_chat_id
+        bot.update_channels(sources=[SOURCE, secondary])
+        console = Console(bot, app, bot.console_data)
+
+        async def change(action, **fields):
+            return await console.command('channel-pair', dict(action=action, confirmed=True,
+                                                               revision=bot.pairing_revision, **fields))
+
+        config = bot.console_data / 'channels.json'
+        legacy = json.loads(config.read_text('utf-8'))
+        bot.load_channel_pairs(legacy)
+        self.assertFalse(bot.strict_pairs)
+        await change('add', source=SOURCE, target=first_target)
+        self.assertEqual(bot.automatic_target(SOURCE), TARGET)
+        before = config.read_bytes()
+        self.assertEqual(bot.pairing_state()['missing'], [str(secondary)])
+        for action, fields in [('activate', {}), ('add', {'source': secondary, 'target': first_target}),
+                               ('add', {'source': first_target, 'target': second_target})]:
+            with self.subTest(action=action, fields=fields), self.assertRaises(ValueError):
+                await change(action, **fields)
+        self.assertEqual(config.read_bytes(), before)
+        await self.enqueue(self.event(10))
+        await change('add', source=secondary, target=second_target)
+        await change('activate')
+        self.assertTrue(bot.strict_pairs)
+        self.assertEqual(bot.target_chat_id, default)
+        with self.assertRaisesRegex(ValueError, '已改变'):
+            await console.command('channel-pair', dict(action='delete', source=SOURCE,
+                                                       confirmed=True, revision=0))
+        replay = self.event(10)
+        replay.message.date = datetime.fromtimestamp(1, timezone.utc)
+        await self.enqueue(replay)
+        mixed_album = self.event(20, 21, album=42)
+        mixed_album.messages[0].date = replay.message.date
+        mixed_album.messages[1].date = datetime.fromtimestamp(bot.channel_pairs[SOURCE][2], timezone.utc)
+        await self.enqueue(mixed_album)
+        await self.enqueue(self.event(11))
+        await self.enqueue(self.event(12, channel=secondary))
+        await self.enqueue(self.event(13, channel=first_target))
+        await change('toggle', source=secondary)
+        await self.enqueue(self.event(14, channel=secondary))
+        await change('toggle', source=secondary)
+        await change('edit', source=SOURCE, target=first_target + 10)
+        await self.enqueue(self.event(15))
+        with patch.object(app, 'ADMIN_IDS', [61]):
+            reply = AsyncMock()
+            event = SimpleNamespace(sender_id=61, chat_id=61, respond=AsyncMock(return_value=None))
+            await bot.run_admin_action(event, ['/export_range', str(SOURCE), '100', '110'], reply)
+        tasks = []
+        while not bot.task_queue.queue.empty():
+            task = bot.task_queue.queue.get_nowait()
+            bot.task_queue.queue.task_done()
+            tasks.append((task.mode, task.message_ids[0] if task.message_ids else None, task.target_chat_id))
+        self.assertEqual(tasks, [('monitor_copy', 10, TARGET), ('monitor_copy', 11, first_target),
+                                 ('monitor_copy', 12, second_target), ('monitor_copy', 15, first_target + 10),
+                                 ('export_range', 100, default)])
+        fresh = self.make_bot()
+        saved = json.loads(config.read_text('utf-8'))
+        fresh.load_channel_pairs(saved)
+        self.assertTrue(fresh.strict_pairs)
+        self.assertEqual(fresh.channel_pairs, bot.channel_pairs)
+
+    async def test_paired_resync_only_uses_matching_target(self):
+        bot = self.bot
+        target = TARGET + 1
+        bot.change_channel_pair('add', SOURCE, target, expected=bot.pairing_revision)
+        bot.change_channel_pair('activate', expected=bot.pairing_revision)
+        mappings = bot.monitor_message_map()
+        mappings.remember(SOURCE, TARGET, {7: 70})
+        mappings.remember(SOURCE, target, {8: 80})
+        event = SimpleNamespace(sender_id=61, chat_id=61)
+        reply = AsyncMock()
+        with patch.object(app, 'ADMIN_IDS', [61]):
+            await bot.run_admin_action(event, ['/resync', str(SOURCE), '7'], reply)
+            self.assertIn('没有转发映射', reply.await_args.args[0])
+            self.assertTrue(bot.task_queue.queue.empty())
+            await bot.run_admin_action(event, ['/resync', str(SOURCE), '8'], reply)
+        task = bot.task_queue.queue.get_nowait()
+        bot.task_queue.queue.task_done()
+        self.assertEqual((task.mode, task.target_chat_id, task.message_ids), ('monitor_edit', target, [8]))
 
     async def test_bot_link_http_redemption_and_qr_requests_require_valid_session(self):
         from console_http import Console, Handler

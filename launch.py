@@ -129,6 +129,7 @@ async def serve(data):
         bot.channel_names = {
             saved_id(cid): name for cid, name in saved.get("names", {}).items()
         }
+        bot.load_channel_pairs(saved)
     else:
         bot.update_channels()
     addr = (os.getenv("BIND", "127.0.0.1"), int(os.getenv("PORT", "8765")))

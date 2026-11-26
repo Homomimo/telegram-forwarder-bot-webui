@@ -20,7 +20,7 @@ const paths = {
     "M3 6h8m5 0h5 M3 12h2m5 0h11 M3 18h10m5 0h3 M12 3v6 M7 9v6 M15 15v6",
 };
 function ico(k) {
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[k === "mappings" ? "jobs" : k]}"/></svg>`;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[k === "mappings" || k === "pairs" ? "jobs" : k]}"/></svg>`;
 }
 const pair = (k, v) =>
   `<div class="pair"><span>${k}</span><span>${esc(v)}</span></div>`;
@@ -104,6 +104,7 @@ const pages = {
   jobs: "任务队列",
   history: "转发记录",
   mappings: "源帖映射",
+  pairs: "频道配对",
   settings: "工作台设置",
 };
 function go(k) {
@@ -175,7 +176,7 @@ function draw() {
   if (page === "home") {
     body += card(
       "当前运行状态",
-      `${pair("目标频道", channelLabel(config.target))}${pair("排队 / 待核对", `${q.counts.queued} / ${s.review_total}`)}${pair("当前任务", q.current_task ? "#" + q.current_task.job_id : "空闲")}`,
+      `${pair("默认目标", channelLabel(config.target))}${pair("排队 / 待核对", `${q.counts.queued} / ${s.review_total}`)}${pair("当前任务", q.current_task ? "#" + q.current_task.job_id : "空闲")}`,
     );
     body += card("最近转发", records(history.slice(0, 6)));
   } else if (page === "jobs") {
@@ -212,13 +213,23 @@ function draw() {
     }
     const clear = mappings?.total && !mappingError ? btn("clearMappings", "清理全部映射…") : "";
     body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1) + clear);
+  } else if (page === "pairs") {
+    const { strict, rows, missing } = s.pairing;
+    const status = strict ? "严格一对一已启用" : "准备切换 · 自动复制仍使用旧版目标";
+    const waiting = !strict && missing.length
+      ? `<p class="hint">尚未启用配对的现有监听源：${missing.map((id) => esc(channelLabel(id))).join("、")}</p>` : "";
+    const enable = !strict && !missing.length && rows.some((row) => row.enabled)
+      ? btn("activatePairs", "启用严格一对一…") : "";
+    body += card(status, waiting + table(["源频道", "目标频道", "状态", "操作"], rows.map((row) =>
+      `<tr><td>${esc(channelLabel(row.source))}</td><td>${esc(channelLabel(row.target))}</td><td>${row.enabled ? "启用" : "暂停"}</td><td><div class="actions">${btn("editPair", "更改目标", "", row.source)}${btn("togglePair", row.enabled ? "暂停" : "恢复", "", row.source)}${btn("deletePair", "删除", "", row.source)}</div></td></tr>`
+    ), "尚未配置频道配对。"), `<div class="actions">${btn("addPair", "新增配对")}${enable}</div>`);
   } else {
     body += card(
-      "目标频道",
+      "默认目标频道",
       pair("当前目标", channelLabel(config.target)),
       `<div class="actions">${config.target ? btn("rename", "编辑备注", "", config.target) : ""}${btn("target", "更改目标")}</div>`,
     );
-    body += card(
+    if (!s.pairing?.strict) body += card(
       "监听源",
       s.sources.length
         ? s.sources
@@ -235,7 +246,7 @@ function draw() {
   const title = page === "mappings" ? "自动复制的源帖映射" : pages[page];
   const description = page === "mappings"
     ? "查看已确认自动复制的源帖及其对应的目标帖。点击链接可打开对应消息。"
-    : "请仅转发获授权的内容";
+    : page === "pairs" ? "自动复制按配对发送。手动和批量转发使用默认目标。" : "请仅转发获授权的内容";
   $("#page").innerHTML =
     `<div class="rowhead"><div><h1>${title}</h1><div class="sub">${description}</div></div>${btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
 }
@@ -334,7 +345,47 @@ function configureChannel(isTarget) {
     },
   );
 }
+function savePair(action, revision, fields = {}) {
+  return act("channel-pair", { action, revision, confirmed: true, ...fields });
+}
+function editPair(id) {
+  const { revision, rows } = s.pairing;
+  const row = rows.find((item) => item.source === id);
+  if (id && !row) return;
+  const label = row ? "更改配对目标" : "新增频道配对";
+  const source = row ? pair("源频道", channelLabel(row.source)) : field("源频道", "source", "频道 ID、@用户名或链接");
+  modal(label, source + field("目标频道", "target", "频道 ID、@用户名或链接", row ? markedId(row.target) : ""),
+    "识别频道", async (p) => {
+      const dialogGeneration = generation;
+      const resolve = (channel) => act("preview-channel", { channel });
+      const src = row ? { channel: row.source } : await resolve(p.source);
+      const dst = await resolve(p.target);
+      if (generation !== dialogGeneration || !$("#dlg").open) return false;
+      const display = (info) => info.title ? `${info.title}（${markedId(info.channel)}）` : channelLabel(info.channel);
+      modal(label, pair("源频道", display(src)) + pair("目标频道", display(dst)) +
+        '<p class="hint">请核对频道。Bot 尚未验证读写权限。</p>', "确认保存",
+        () => savePair(row ? "edit" : "add", revision, { source: src.channel, target: dst.channel }));
+      return false;
+    });
+}
+function confirmPair(id, action) {
+  const { rows, revision } = s.pairing;
+  const row = rows.find((item) => item.source === id);
+  if (!row) return;
+  const label = action === "delete" ? "删除" : row.enabled ? "暂停" : "恢复";
+  modal(`${label}频道配对`, pair("源频道", channelLabel(row.source)) + pair("目标频道", channelLabel(row.target)),
+    `确认${label}`, () => savePair(action, revision, { source: id }));
+}
 const handlers = {
+  addPair: () => editPair(),
+  editPair,
+  togglePair: (id) => confirmPair(id, "toggle"),
+  deletePair: (id) => confirmPair(id, "delete"),
+  activatePairs: () => {
+    const { revision } = s.pairing;
+    modal("启用严格一对一", "<p>切换后自动复制按频道配对发送。手动和批量转发继续使用默认目标，已入队任务保留原目标。</p>",
+      "确认启用", () => savePair("activate", revision));
+  },
   mappingPage: (id) => loadMappings(id),
   clearMappings: () =>
     modal(

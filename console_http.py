@@ -39,6 +39,8 @@ class Console:
             check(isinstance(page, str) and re.fullmatch(r"[1-9][0-9]{0,8}", page), "页码必须是正整数")
             return await bot.list_monitor_mappings(int(page))
         if op == "state":
+            channel_ids = {*bot.monitor_chat_ids, bot.target_chat_id, *bot.channel_pairs}
+            channel_ids.update(pair[0] for pair in bot.channel_pairs.values())
             history = bot.forward_log.get_recent(100)
             recent = [
                 {
@@ -70,7 +72,7 @@ class Console:
                 config={"target": str(bot.target_chat_id or "")},
                 channel_names={
                     str(cid): name
-                    for cid in (*bot.monitor_chat_ids, bot.target_chat_id)
+                    for cid in channel_ids
                     if cid is not None
                     and (
                         name := bot.channel_names.get(bot.normalize_source_chat_id(cid))
@@ -81,12 +83,25 @@ class Console:
                 review_total=total,
                 history=recent,
                 sources=bot.monitor_chat_ids,
+                pairing=bot.pairing_state(),
                 accounts=accounts.summary(self.data),
                 listener_status="用户会话已连接"
                 if bot.is_user_monitor_active()
                 else "仅 Bot / 用户会话未连接",
             )
         check(queue.running and not bot._stopping, "Bot 队列尚未就绪")
+        if op == "channel-pair":
+            action = p.get("action")
+            check(action in ("add", "edit", "toggle", "delete", "activate"), "无效的频道配对操作")
+            check(p.get("confirmed") is True, "请确认频道配对操作")
+            source = numeric_channel(str(p.get("source", "")))
+            target = numeric_channel(str(p.get("target", "")))
+            if action != "activate":
+                check(source, "请选择有效的源频道")
+            if action in ("add", "edit"):
+                check(target, "请选择有效的目标频道")
+            bot.change_channel_pair(action, source, target, expected=p.get("revision"))
+            return {"ok": True}
         if op == "clear-mappings":
             check(p.get("confirmed") is True, "请确认清理全部源帖映射")
             return {"removed": await bot.clear_monitor_mappings()}
@@ -329,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
             result = self.server.console.dispatch(self.path[5:], p)
-            self.reply(200, result if self.path in ("/api/preview-channel", "/api/clear-mappings")
+            self.reply(200, result if self.path in ("/api/preview-channel", "/api/clear-mappings", "/api/channel-pair")
                        else {"id": result})
         except (TimeoutError, sqlite3.Error, OSError):
             self.reply(503, {"error": "服务忙或存储不可用，请刷新核对状态"})

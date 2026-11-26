@@ -1057,6 +1057,7 @@ https://t.me/channel_name/42
 发送：/monitor add 9876543210
 
 以后该频道发新帖时会自动复制；正文、媒体说明或支持的图片和视频有修改时，会更新原来的目标帖。
+多个源需要独立目标时，请打开「📡 监听频道 → 🔀 频道配对」，配好并启用严格一对一。手动投稿和批量转发仍使用默认目标。
 
 ⑤ 有一条已经转发，但内容没更新？
 发送：/resync https://t.me/c/9876543210/42
@@ -1948,6 +1949,9 @@ class TelegramBot:
         self.tdl = TDLDownloader()
         self.target_chat_id: Optional[int] = TARGET_CHAT_ID
         self.monitor_chat_ids: list[int] = MONITOR_CHAT_IDS.copy()
+        self.channel_pairs: dict[int, tuple[int, bool, int]] = {}  # source -> (target, enabled, since)
+        self.strict_pairs = False
+        self.pairing_revision = 0
         self.channel_names: dict[int, str] = {}  # Bare ID, shared across roles.
         self.forward_log = ForwardLog()
         self._pending_albums: set[tuple[int, int]] = set()
@@ -2020,6 +2024,9 @@ class TelegramBot:
 
     def has_monitor_chat_id(self, chat_id: int) -> bool:
         normalized_chat_id = self.normalize_source_chat_id(chat_id)
+        if self.strict_pairs:
+            pair = self.channel_pairs.get(normalized_chat_id)
+            return bool(pair and pair[1])
         return any(self.normalize_source_chat_id(source_id) == normalized_chat_id for source_id in self.monitor_chat_ids)
 
     async def resolve_channel(self, value: str) -> tuple[int, str]:
@@ -2093,10 +2100,85 @@ class TelegramBot:
         self.update_channels(sources=new_sources)
         return len(self.monitor_chat_ids) != before
 
-    def update_channels(self, *, target=None, sources=None, names=None):
+    @staticmethod
+    def validate_channel_pairs(pairs, default_target=None):
+        if any(type(src) is not int or not 1 <= src <= MAX_CHANNEL_ID or
+               type(dst) is not int or not 1 <= dst <= MAX_CHANNEL_ID for src, (dst, _, _) in pairs.items()):
+            raise ValueError('请填写有效的源频道和目标频道 ID。')
+        targets = {target for target, _, _ in pairs.values()}
+        if len(targets) != len(pairs):
+            raise ValueError('每个目标频道只能绑定一个源频道。')
+        if targets.intersection(pairs):
+            raise ValueError('源频道不能同时作为自动配对的目标频道。')
+        if default_target is not None and default_target in pairs:
+            raise ValueError('手动转发的默认目标不能同时作为自动配对的源频道。')
+
+    def load_channel_pairs(self, saved):
+        records = saved.get('pairs', [])
+        strict = saved.get('strict_pairs', False)
+        if not isinstance(records, list) or type(strict) is not bool:
+            raise ValueError('频道配对配置无效，未覆盖原配置。')
+        pairs = {}
+        for row in records:
+            if not isinstance(row, dict):
+                raise ValueError('频道配对配置无效，未覆盖原配置。')
+            source, target = (numeric_channel(str(row.get(key))) for key in ('source', 'target'))
+            enabled, since = row.get('enabled'), row.get('since', 0)
+            if not source or not target or source in pairs or type(enabled) is not bool or type(since) is not int or since < 0:
+                raise ValueError('频道配对配置无效，未覆盖原配置。')
+            pairs[source] = (target, enabled, since)
+        self.validate_channel_pairs(pairs, self.monitor_target_channel_id() if strict else None)
+        self.channel_pairs, self.strict_pairs = pairs, strict
+
+    def pairing_state(self):
+        legacy = {self.normalize_source_chat_id(cid) for cid in self.monitor_chat_ids}
+        return dict(strict=self.strict_pairs, revision=self.pairing_revision,
+                    missing=[str(cid) for cid in sorted(legacy - {src for src, pair in self.channel_pairs.items() if pair[1]})],
+                    rows=[dict(source=str(src), target=str(target), enabled=enabled)
+                          for src, (target, enabled, _) in sorted(self.channel_pairs.items())])
+
+    def change_channel_pair(self, action, source=None, target=None, *, expected):
+        if type(expected) is not int or expected != self.pairing_revision:
+            raise ValueError('频道配置已改变，请刷新后重新确认。')
+        pairs, strict = self.channel_pairs.copy(), self.strict_pairs
+        now = int(time.time())
+        if action == 'activate':
+            if strict:
+                raise ValueError('已经在使用严格一对一配对。')
+            if not any(pair[1] for pair in pairs.values()) or self.pairing_state()['missing']:
+                raise ValueError('请先为所有现有监听源配置并启用配对。')
+            pairs = {src: (dst, enabled, now) for src, (dst, enabled, _) in pairs.items()}
+            strict = True
+        elif action == 'add':
+            if source in pairs:
+                raise ValueError('此源频道已有配对，请编辑原配对。')
+            pairs[source] = (target, True, now)
+        elif source not in pairs:
+            raise ValueError('频道配对已不存在，请刷新。')
+        else:
+            old_target, enabled, since = pairs[source]
+            if action == 'edit':
+                pairs[source] = (target, enabled, since if target == old_target else now)
+            elif action == 'toggle':
+                pairs[source] = (old_target, not enabled, now if not enabled else since)
+            elif action == 'delete':
+                del pairs[source]
+            else:
+                raise ValueError('无效的频道配对操作。')
+        self.update_channels(pairs=pairs, strict_pairs=strict)
+
+    def update_channels(self, *, target=None, sources=None, names=None, pairs=None, strict_pairs=None):
         target = self.target_chat_id if target is None else target
+        if sources is not None and self.strict_pairs:
+            raise ValueError('已启用严格一对一，请在「频道配对」管理监听源。')
         sources = self.monitor_chat_ids if sources is None else sources
+        pairs = self.channel_pairs if pairs is None else pairs
+        strict = self.strict_pairs if strict_pairs is None else strict_pairs
+        default = self.normalize_source_chat_id(target) if target is not None else None
+        self.validate_channel_pairs(pairs, default if strict else None)
         active = {self.normalize_source_chat_id(cid) for cid in sources}
+        active.update(pairs)
+        active.update(dst for dst, _, _ in pairs.values())
         if target is not None:
             active.add(self.normalize_source_chat_id(target))
         labels = {cid: name for cid, name in self.channel_names.items() if cid in active}
@@ -2111,11 +2193,20 @@ class TelegramBot:
             else:
                 labels.pop(bare, None)
         if self.console_data is not None:
-            accounts.private_write(self.console_data / 'channels.json',
-                                   {'target': target, 'sources': sources, 'names': labels})
+            saved = {'target': target, 'sources': sources, 'names': labels}
+            if pairs or strict:
+                saved.update(strict_pairs=strict, pairs=[dict(source=src, target=dst, enabled=on, since=since)
+                                                        for src, (dst, on, since) in sorted(pairs.items())])
+            accounts.private_write(self.console_data / 'channels.json', saved)
+        if (target, sources, pairs, strict) != (self.target_chat_id, self.monitor_chat_ids, self.channel_pairs, self.strict_pairs):
+            self.pairing_revision += 1
         self.target_chat_id, self.monitor_chat_ids, self.channel_names = target, sources, labels
+        self.channel_pairs, self.strict_pairs = pairs, strict
 
     def format_monitor_chat_ids(self) -> str:
+        if self.strict_pairs:
+            enabled = sum(pair[1] for pair in self.channel_pairs.values())
+            return f'📡 严格一对一已启用（{enabled}/{len(self.channel_pairs)} 组启用）。请在「频道配对」查看和管理。'
         if not self.monitor_chat_ids:
             return (
                 "ℹ️ 尚未配置自动监听源频道\n\n"
@@ -2199,6 +2290,12 @@ class TelegramBot:
             return None
         return utils.resolve_id(self.target_chat_id)[0]
 
+    def automatic_target(self, source: int) -> Optional[int]:
+        if not self.strict_pairs:
+            return self.monitor_target_channel_id()
+        pair = self.channel_pairs.get(source)
+        return pair[0] if pair and pair[1] else None
+
     async def _admit_monitor(self, event, source, target, ids, *, mode, grouped_id=None, album_member=False):
         queue = self.task_queue
         epoch = queue.admission_epoch
@@ -2239,14 +2336,31 @@ class TelegramBot:
         if not self.is_monitor_post(message) or (event.chat_id, message.id) in self._forward_status_ids:
             return
         source_id = message.peer_id.channel_id
-        target_id = self.monitor_target_channel_id()
+        target_id = self.automatic_target(source_id)
         if target_id is None or target_id == source_id:
             logger.warning("跳过频道同步：未配置目标频道或目标就是源频道，source=%s", source_id)
             return
         # Only observed posts of this source may be forwarded, never inferred adjacent IDs.
         members = {m.id: m for m in messages if m.peer_id == message.peer_id and m.grouped_id == message.grouped_id}
+        copy_allowed = not edited
+        if self.strict_pairs:
+            since = self.channel_pairs[source_id][2]
+            for mid, item in list(members.items()):
+                date = getattr(item, 'date', None)
+                if date is not None and date.timestamp() < since:
+                    if message.grouped_id is not None:
+                        # A route change must never turn an observed album into a partial album.
+                        copy_allowed = False
+                    if edited or getattr(item, 'edit_date', None) is not None:
+                        async with self._monitor_db_lock:
+                            mapped = self.monitor_message_map().get(source_id, mid, target_id)
+                        if mapped is not None:
+                            await self._admit_monitor(event, source_id, target_id, [mid], mode='monitor_edit')
+                    del members[mid]
+        if not members:
+            return
         epoch = self.task_queue.admission_epoch
-        if not edited:
+        if copy_allowed:
             ids = sorted(members)
             await self._admit_monitor(event, source_id, target_id, ids, mode='monitor_copy',
                                       grouped_id=message.grouped_id, album_member=album_member)
@@ -2989,6 +3103,9 @@ class TelegramBot:
         if self._stopping or event.sender_id not in ADMIN_IDS:
             return False
         command = parts[0]
+        if command == '/monitor' and len(parts) > 1 and self.strict_pairs:
+            await respond('已启用严格一对一，请在「频道配对」管理监听源。')
+            return True
         if command in ('/restart', '/tdlstop') and len(parts) != 1:
             await respond(f"❌ {command} 不接受其他参数，未执行")
             return True
@@ -3059,7 +3176,11 @@ class TelegramBot:
                     "/forwardto 1234567890"
                 )
                 return True
-            self.update_channels(target=new_id)
+            try:
+                self.update_channels(target=new_id)
+            except ValueError as exc:
+                await respond(f'❌ {exc}')
+                return True
             await respond(
                 f"✅ 目标频道已更新\n"
                 f"当前目标频道：{self.channel_label(self.target_chat_id)}\n\n"
@@ -3086,7 +3207,7 @@ class TelegramBot:
                 await respond("❌ 用法：/resync https://t.me/c/1234567890/42\n"
                               "或 /resync <源频道> <源消息ID>。请使用源频道原帖链接，不要使用评论或话题链接。")
                 return True
-            target_id = self.monitor_target_channel_id()
+            target_id = self.automatic_target(source_id)
             if not self.has_monitor_chat_id(source_id) or not target_id or target_id == source_id:
                 await respond("❌ 请检查监听源频道与当前目标频道设置")
                 return True
@@ -3120,7 +3241,8 @@ class TelegramBot:
             else:
                 await respond(
                     f"🎯 当前目标频道：{self.channel_label(self.target_chat_id)}\n\n"
-                    "所有新加入队列的任务都会转发到该频道。"
+                    + ("手动转发和批量转发使用此频道，自动复制使用频道配对。" if self.strict_pairs
+                       else "所有新加入队列的任务都会转发到该频道。")
                 )
             return True
 
@@ -3557,12 +3679,14 @@ class TelegramBot:
         self.register_monitor_events(self.client, fallback=True)
 
     def _log_startup_settings(self) -> None:
-        sources = self.monitor_chat_ids
+        sources = ([src for src, pair in self.channel_pairs.items() if pair[1]]
+                   if self.strict_pairs else self.monitor_chat_ids)
         preview = ', '.join(map(str, sources[:8])) or '无'
         if len(sources) > 8:
             preview += f'，另有 {len(sources) - 8} 个'
         logger.info('[启动/配置] 目标频道=%s；源频道 %d 个（%s）；管理员 %d 人；额外投稿名单 %d 人',
                     self.monitor_target_channel_id() or '未设置', len(sources), preview, len(ADMIN_IDS), len(SUBMITTER_IDS))
+        logger.info('[启动/配置] 自动复制路由：%s', '严格一对一' if self.strict_pairs else '旧版共享目标')
         logger.info('[启动/配置] MONITOR_TDL_FALLBACK：%s；状态消息自动删除：%s',
                     '开启' if MONITOR_TDL_FALLBACK else '关闭',
                     (f'普通 {AUTO_DELETE_STATUS_SECONDS}s / 错误 {AUTO_DELETE_ERROR_SECONDS}s / 命令 {AUTO_DELETE_COMMAND_SECONDS}s'
@@ -3615,7 +3739,9 @@ class TelegramBot:
                 logger.warning('[启动/通知] 启动面板发送失败（%s）；不影响 Bot 运行', type(e).__name__)
 
         target = self.monitor_target_channel_id()
-        if not self.monitor_chat_ids:
+        if self.strict_pairs:
+            sync = '等待源频道更新（严格一对一）' if any(pair[1] for pair in self.channel_pairs.values()) else '所有配对已暂停或移除'
+        elif not self.monitor_chat_ids:
             sync = '未配置监听源'
         elif not target:
             sync = '等待设置目标频道'
