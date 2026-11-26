@@ -98,6 +98,12 @@ class AdminPanel:
         session.choices = choices
         return buttons
 
+    def home_view(self):
+        if not self.webui_url:
+            return self.home, HOME
+        hint = '\n\n🌐 首次使用，请点击「打开 WebUI」。登录工作台后，进入「工作台设置」，按使用需求扫码登录 Telegram 账号。'
+        return self.home + hint, [[Button.url('🌐 打开 WebUI', self.webui_url)], *HOME]
+
     async def open(self, uid, send, *, guide=False, history=None, mappings=None):
         if not self.allowed(uid):
             return
@@ -111,7 +117,7 @@ class AdminPanel:
                     return
             else:
                 text, rows = (self.history_view(session, history) if history is not None else
-                              (self.guide, [BACK]) if guide else (self.home, HOME))
+                              (self.guide, [BACK]) if guide else self.home_view())
             msg = await send(text, link_preview=False, buttons=self._keyboard(session, rows),
                              **({'parse_mode': 'html'} if history is not None or mappings is not None else {}))
             session.root_mid = session.mid = msg.id
@@ -275,7 +281,7 @@ class AdminPanel:
 
     async def _navigate(self, s, event, action):
         if action in ('home', 'cancel'):
-            await self._screen(s, self.home, HOME)
+            await self._screen(s, *self.home_view())
         elif action == 'help':
             await self._screen(s, self.guide, [BACK])
         elif action == 'system':

@@ -137,16 +137,23 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('私聊', group.respond.await_args.args[0])
         self.assertNotIn('https://', group.respond.await_args.args[0])
 
-    async def test_webui_url_only_appears_in_configured_private_system_menu(self):
+    async def test_webui_url_appears_in_configured_private_home_and_system_menu(self):
         label = '🌐 打开 WebUI'
         panel = self.bot.admin_panel
+        self.assertFalse(any(b.text == label for row in self.page.buttons for b in row))
+        self.assertNotIn('扫码登录', self.page.raw_text)
         await self.click('⚙️ 系统管理')
         self.assertFalse(any(b.text == label for row in self.page.buttons for b in row))
         await self.click('⬅️ 返回面板')
 
         panel.webui_url = 'https://203.0.113.10:9443'
         await self.text('/start')
-        self.assertFalse(any(b.text == label for row in self.page.buttons for b in row))
+        markup = TelegramClient.build_reply_markup(self.page.buttons)
+        home_link, = markup.rows[0].buttons
+        self.assertEqual(home_link.text, label)
+        self.assertIsInstance(home_link.type, types.InlineButtonTypeUrl)
+        self.assertEqual(home_link.type.url, panel.webui_url)
+        self.assertIn('「工作台设置」，按使用需求扫码登录', self.page.raw_text)
         await self.click('⚙️ 系统管理')
         markup = TelegramClient.build_reply_markup(self.page.buttons)
         links = [b for row in markup.rows for b in row.buttons if b.text == label]
@@ -155,6 +162,8 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(links[0].type.url, panel.webui_url)
         self.assertEqual(set(self.session.choices.values()), {'ask:restart', 'home'})
         await self.click('⬅️ 返回面板')
+        self.assertEqual(self.page.buttons[0][0].type.url, panel.webui_url)
+        self.assertIn('扫码登录', self.page.raw_text)
 
         for uid, chat in [(UID, -90), (71, 71)]:
             event = await self.text('/start', uid=uid, chat=chat)
@@ -183,6 +192,8 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('buttons', user.respond.await_args.kwargs)
         await self.text('/help')
         self.assertEqual(self.page.raw_text, app.HELP_MESSAGE_ADMIN)
+        self.assertIn('TDL 转发账号：手动无引用转发或批量转发前，需要扫码登录', self.page.raw_text)
+        self.assertIn('Telethon 用户会话：想用个人 Telegram 账号监听源频道时', self.page.raw_text)
         await self.click('⬅️ 返回面板')
 
     async def test_button_owner_generation_and_message_binding(self):
