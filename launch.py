@@ -108,6 +108,10 @@ async def serve(data):
         level=core.logging.INFO, format="%(levelname)s %(message)s"
     )
     core.logging.getLogger("telethon").setLevel(core.logging.WARNING)
+    try:
+        ip, ip_source = vps_https.resolve_ip(os.getenv("RELAY_VPS_IP"))
+    except ValueError as exc:
+        raise SystemExit(f"[启动/WebUI] {exc}") from None
     bot = core.TelegramBot()
     bot.console_data = data
     cfg = data / "channels.json"
@@ -133,10 +137,6 @@ async def serve(data):
     else:
         bot.update_channels()
     addr = (os.getenv("BIND", "127.0.0.1"), int(os.getenv("PORT", "8765")))
-    ip = os.getenv("RELAY_VPS_IP")
-    if not ip:
-        raise SystemExit("必须填写 RELAY_VPS_IP 并使用 HTTPS")
-    ip = vps_https.validate_ip(ip)
     try:
         public_port = int(os.environ.get("WEB_PORT", addr[1]))
     except ValueError:
@@ -146,6 +146,8 @@ async def serve(data):
     bot.admin_panel.webui_url = f"https://{ip}:{public_port}"
     server = vps_https.IPHTTPSServer(addr, Handler, ip, vps_https.tls_context(data, ip))
     cert = (data / "tls" / ip / "cert.pem").read_text("ascii")
+    accounts.private_write(vps_https.RUNTIME_IP_FILE, ip)
+    print(f"[启动/WebUI] {bot.admin_panel.webui_url}（{ip_source}）", flush=True)
     print("HTTPS SHA256:", hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest(), flush=True)
     server.console = Console(bot, core, data)
     threading.Thread(target=server.serve_forever, daemon=True).start()

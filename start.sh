@@ -6,7 +6,7 @@ if [ "$#" -gt 1 ] || [ "${1-live}" != live ] || [ "${RELAY_MODE-live}" != live ]
   echo '只支持正式服务。用法: sh start.sh [live]' >&2
   exit 2
 fi
-: "${RELAY_VPS_IP:?请设置 VPS 公网 IPv4}" "${BOT_TOKEN:?请设置 Bot Token}" "${ADMIN_IDS:?请设置 Telegram 管理员用户 ID}" "${API_ID:?请设置 API ID}" "${API_HASH:?请设置 API Hash}"
+: "${BOT_TOKEN:?请设置 Bot Token}" "${ADMIN_IDS:?请设置 Telegram 管理员用户 ID}" "${API_ID:?请设置 API ID}" "${API_HASH:?请设置 API Hash}"
 name=telegram-forwarder-bot
 port=${WEB_PORT:-8765}
 version=$(cat VERSION)

@@ -1,11 +1,18 @@
-"""Direct HTTPS for a single configured VPS IPv4 address."""
+"""Direct HTTPS for the configured or detected VPS IPv4 address."""
 
 import ipaddress
+from http.client import HTTPException
 from http.server import ThreadingHTTPServer
 import ssl
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib import request
+
+
+PUBLIC_IPV4_URL = "https://api.ipify.org"
+# The standalone updater reads this container-local file with docker exec.
+RUNTIME_IP_FILE = Path("/tmp/telegram-forwarder-webui-ip.json")
 
 
 def validate_ip(value):
@@ -16,6 +23,22 @@ def validate_ip(value):
     if address.is_unspecified or address.is_multicast or int(address) == 0xffffffff:
         raise ValueError("RELAY_VPS_IP 必须是可访问的主机地址")
     return str(address)
+
+
+def resolve_ip(override):
+    override = (override or "").strip()
+    if override:
+        return validate_ip(override), "手动配置"
+
+    try:
+        opener = request.build_opener(request.ProxyHandler({}))
+        with opener.open(PUBLIC_IPV4_URL, timeout=5) as response:
+            address = ipaddress.IPv4Address(response.read(64).decode("ascii").strip())
+        if not address.is_global or address.is_multicast or address.is_reserved:
+            raise ValueError("响应不是公网 IPv4")
+    except (OSError, HTTPException, ValueError) as exc:
+        raise ValueError("无法自动探测 VPS 公网 IPv4。请检查容器的 IPv4 出网，或手动设置 RELAY_VPS_IP。") from exc
+    return str(address), "自动探测"
 
 
 def tls_context(data, ip):

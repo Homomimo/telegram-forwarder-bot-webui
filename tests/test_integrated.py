@@ -44,6 +44,34 @@ class DataDirectoryTests(unittest.TestCase):
             self.assertEqual(config.read_text(encoding="utf-8"), '{"target": 1234567890}')
 
 
+class VpsIpTests(unittest.TestCase):
+    def test_manual_address_is_used_without_network(self):
+        import vps_https
+
+        with patch.object(vps_https.request, 'build_opener') as build:
+            self.assertEqual(vps_https.resolve_ip(' 192.168.1.10 '), ('192.168.1.10', '手动配置'))
+            with self.assertRaisesRegex(ValueError, '请填写 VPS 的 IPv4 地址'):
+                vps_https.resolve_ip('https://invalid.example')
+            build.assert_not_called()
+
+    def test_detection_requires_public_ipv4_and_has_actionable_failure(self):
+        import vps_https
+
+        with patch.object(vps_https.request, 'build_opener') as build:
+            opener = build.return_value
+            opener.open.return_value = BytesIO(b'1.1.1.1\n')
+            self.assertEqual(vps_https.resolve_ip(''), ('1.1.1.1', '自动探测'))
+            opener.open.assert_called_once_with(vps_https.PUBLIC_IPV4_URL, timeout=5)
+            for response in (b'', b'10.0.0.1', b'100.64.0.1', b'224.0.0.1', b'::1', b'203.0.113.10', b'\xff'):
+                with self.subTest(response=response):
+                    opener.open.return_value = BytesIO(response)
+                    with self.assertRaisesRegex(ValueError, 'RELAY_VPS_IP'):
+                        vps_https.resolve_ip(None)
+            opener.open.side_effect = TimeoutError()
+            with self.assertRaisesRegex(ValueError, 'RELAY_VPS_IP'):
+                vps_https.resolve_ip(None)
+
+
 class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()

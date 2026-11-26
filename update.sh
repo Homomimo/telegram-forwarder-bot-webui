@@ -133,9 +133,15 @@ def backup(data):
 
 # Probe only the loopback TLS endpoint inside this container; the service validates the HTTP Host header.
 PROBE = '''import http.client, json, os, ssl
+from pathlib import Path
+try:
+    host = json.loads(Path('/tmp/telegram-forwarder-webui-ip.json').read_text('utf-8'))
+except FileNotFoundError:
+    # Images from before auto-detection always configured their address through the environment.
+    host = os.environ['RELAY_VPS_IP'].strip()
 conn = http.client.HTTPSConnection('127.0.0.1', int(os.environ['PORT']), timeout=4,
                                    context=ssl._create_unverified_context())
-conn.request('GET', '/api/auth/session', headers={'Host': os.environ['RELAY_VPS_IP']})
+conn.request('GET', '/api/auth/session', headers={'Host': host})
 r = conn.getresponse()
 raise SystemExit(0 if r.status == 200 and json.load(r).get('authenticated') is False else 1)
 '''
