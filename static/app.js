@@ -217,7 +217,7 @@ function draw() {
     body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1) + clear);
   } else if (page === "pairs") {
     const { strict, rows, missing } = s.pairing;
-    const status = strict ? "严格一对一已启用" : "准备切换 · 自动复制仍使用默认共享目标";
+    const status = strict ? "严格一对一已启用" : "准备切换 · 自动复制仍使用默认目标频道";
     const waiting = !strict && missing.length
       ? `<p class="hint">尚未启用配对的现有监听源：${missing.map((id) => esc(channelLabel(id))).join("、")}</p>` : "";
     let modeAction = "";
@@ -402,8 +402,8 @@ const handlers = {
     const labels = sources.map(channelLabel).join("、") || "未设置";
     const idle = !target || !sources.some((id) => markedId(id) !== markedId(target));
     modal("关闭严格一对一",
-      "<p>确认后恢复默认共享目标。已保存的配对、源帖映射和已入队任务会保留。</p>" +
-      pair("旧版监听源", labels) + pair("默认共享目标", channelLabel(target)) +
+      "<p>确认后恢复默认目标频道。已保存的配对、源帖映射和已入队任务会保留。</p>" +
+      pair("旧版监听源", labels) + pair("默认目标频道", channelLabel(target)) +
       (idle ? '<p class="hint">当前配置下，关闭后不会自动转发。</p>' : ""),
       "确认关闭", () => savePair("deactivate", revision));
   },

@@ -452,7 +452,7 @@ class AdminPanel:
         back = [('⬅️ 返回配对', 'pairs:1')]
         if action.startswith('pairs:'):
             page = max(1, min(int(verb), (len(state['rows']) + 5) // 6))
-            mode = '严格一对一已启用' if state['strict'] else '准备切换 · 自动复制仍使用默认共享目标'
+            mode = '严格一对一已启用' if state['strict'] else '准备切换 · 自动复制仍使用默认目标频道'
             lines = ['🔀 频道配对', mode]
             if not state['strict'] and state['missing']:
                 lines.append(f"还有 {len(state['missing'])} 个现有监听源需要启用配对。")
@@ -504,9 +504,9 @@ class AdminPanel:
             if len(sources) > len(labels):
                 labels.append(f'另有 {len(sources) - len(labels)} 个')
             source_summary = '、'.join(labels) or '未设置'
-            detail = ('关闭严格一对一，恢复默认共享目标。\n'
+            detail = ('关闭严格一对一，恢复默认目标频道。\n'
                       f'旧版监听源：{source_summary}\n'
-                      f'默认共享目标：{self.bot.channel_label(target) if target else "未设置"}。')
+                      f'默认目标频道：{self.bot.channel_label(target) if target else "未设置"}。')
             if not target or not any(self.bot.normalize_source_chat_id(cid) != target for cid in sources):
                 detail += '\n当前配置下，关闭后不会自动转发。'
             detail += '\n已保存的配对、源帖映射和已入队任务会保留。'

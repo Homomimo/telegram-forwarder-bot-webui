@@ -3732,7 +3732,7 @@ class TelegramBot:
             preview += f'，另有 {len(sources) - 8} 个'
         logger.info('[启动/配置] 目标频道=%s；源频道 %d 个（%s）；管理员 %d 人；额外投稿名单 %d 人',
                     self.monitor_target_channel_id() or '未设置', len(sources), preview, len(ADMIN_IDS), len(SUBMITTER_IDS))
-        logger.info('[启动/配置] 自动复制路由：%s', '严格一对一' if self.strict_pairs else '默认共享目标')
+        logger.info('[启动/配置] 自动复制路由：%s', '严格一对一' if self.strict_pairs else '默认目标频道')
         logger.info('[启动/配置] MONITOR_TDL_FALLBACK：%s；状态消息自动删除：%s',
                     '开启' if MONITOR_TDL_FALLBACK else '关闭',
                     (f'普通 {AUTO_DELETE_STATUS_SECONDS}s / 错误 {AUTO_DELETE_ERROR_SECONDS}s / 命令 {AUTO_DELETE_COMMAND_SECONDS}s'

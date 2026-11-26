@@ -294,7 +294,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_bot_can_add_activate_and_pause_channel_pair(self):
         await self.click('📡 监听频道')
         await self.click('🔀 频道配对')
-        self.assertIn('自动复制仍使用默认共享目标', self.page.raw_text)
+        self.assertIn('自动复制仍使用默认目标频道', self.page.raw_text)
         self.assertNotIn('pair:activate', self.session.choices.values())
         await self.click('➕ 新增配对')
         destination = TARGET + 1
@@ -345,7 +345,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await self.click('🔀 频道配对')
         await self.click('关闭严格一对一…')
         self.assertIn('旧版监听源：未设置', self.page.raw_text)
-        self.assertIn('默认共享目标：未设置', self.page.raw_text)
+        self.assertIn('默认目标频道：未设置', self.page.raw_text)
         self.assertIn('关闭后不会自动转发', self.page.raw_text)
         await self.click('取消')
         self.assertTrue(bot.strict_pairs)
