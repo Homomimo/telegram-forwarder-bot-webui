@@ -52,7 +52,9 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
     def edit(self, chat, mid, text, **kw):
         msg = self.messages[mid]
         self.assertEqual(msg.chat_id, chat)
-        msg.raw_text, msg.buttons = text, kw.get('buttons')
+        msg.raw_text = text
+        if 'buttons' in kw:
+            msg.buttons = kw['buttons']
         return msg
 
     def delete_messages(self, chat, mids):
@@ -429,6 +431,10 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await self.click('下载整组')
         job = staging.recent(UID)[0][0]
         current = self.page.id
+        jobs_button = self.button('查看文件任务')
+        self.assertTrue(await self.bot.admin_panel.file_download_progress(UID, job, '已完成 1/2 项 · 当前第 2 项\n4 B / 8 B · 50%'))
+        self.assertEqual(self.button('查看文件任务'), jobs_button)
+        self.assertIn('50%', self.page.raw_text)
         self.assertTrue(await self.bot.admin_panel.file_download_ready(UID, job, '下载完成，已暂存 2 项。'))
         self.assertEqual(self.page.id, current)
         self.assertTrue(self.button('暂存文件列表'))
@@ -447,7 +453,11 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.client.get_entity.return_value = NS(noforwards=True, title='素材库/归档')
         self.client.get_messages.side_effect = lambda peer, *, ids: posts if isinstance(ids, list) else posts[0]
 
-        async def write_media(link, path):
+        snapshots = []
+
+        async def write_media(link, path, *, on_progress):
+            on_progress('\x1b[34mchannel:99 → file\x1b[0m … [4 B in 1s; 4 B/s]')
+            snapshots.append(staging.progress[job])
             Path(path).write_bytes(b'12345678')
 
         download = self.bot.tdl.download_media = AsyncMock(side_effect=write_media)
@@ -467,6 +477,9 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
             with staging.open_media(staging.get(item['id'])) as media:
                 self.assertEqual(media.read(), b'12345678')
         self.assertEqual(staging.recent(UID)[0][2], 'done')
+        self.assertIn('已完成 0/3 项', snapshots[0])
+        self.assertIn('4 B / 8 B · 50%', snapshots[0])
+        self.assertIn('已完成 2/3 项', snapshots[2])
         removed, skipped, failed = staging.clean({item['id'] for item in items})
         self.assertEqual((len(removed), skipped, failed), (3, 0, 0))
         self.assertFalse(folder.exists())

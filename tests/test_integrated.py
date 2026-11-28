@@ -9,6 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from itertools import count
 
 from telethon import types
 
@@ -583,6 +584,44 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(restored.queue.qsize(), 1)
         with self.assertRaises(ValueError):
             await submit(restored, 2)
+
+    async def test_manual_tdl_clone_reports_transferred_bytes_and_confirmed_messages(self):
+        bot = self.bot
+        queue = bot.task_queue
+        (bot.console_data / "accounts" / "tdl-home" / ".tdl").mkdir(parents=True)
+        status = SimpleNamespace(edit=AsyncMock())
+        fake_clock = Mock(wraps=app.time)
+        ticks = count()
+        fake_clock.monotonic.side_effect = lambda: next(ticks) * 3
+
+        async def run(args, progress):
+            self.assertIn("--disable-progress-ps", args)
+            await progress("CPU: 3.00% Memory: 22.00 MB Goroutines: 4")
+            await progress("素材频道 [clone] … [12.00 MB in 2s; 6.00 MB/s]")
+            mid = int(args[args.index("--relay-members") + 1])
+            token = args[args.index("--relay-token") + 1]
+            receipt = Path(args[args.index("--relay-receipt") + 1])
+            record = {"version": 1, "token": token, "from": SOURCE, "to": TARGET,
+                      "source": mid, "target": mid + 100, "actor": 777, "operation": "send"}
+            receipt.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            return 0, "", ""
+
+        with (
+            patch.object(app, "time", fake_clock),
+            patch.object(app, "MANUAL_FORWARD_MODE", "tdl"),
+            patch.object(queue, "_get_status", AsyncMock(return_value=status)),
+            patch.object(app.relay_delivery, "plan", AsyncMock(return_value=(SOURCE, [[7], [9]]))),
+            patch.object(bot.tdl, "_run_command", side_effect=run),
+        ):
+            await queue.add_task(None, f"https://t.me/c/{SOURCE}/7", None, 61, mode="export_range",
+                                 source_chat_id=SOURCE, target_chat_id=TARGET, message_ids=[7, 9])
+            self.assertEqual((await self.process()).status, app.TaskStatus.COMPLETED)
+        messages = "\n".join(edit.args[0] for edit in status.edit.await_args_list)
+        self.assertIn("第 1/2 批\n已确认 0/2 条", messages)
+        self.assertIn("第 2/2 批\n已确认 1/2 条", messages)
+        self.assertIn("当前传输：12.0 MB", messages)
+        self.assertNotIn("CPU:", messages)
+        self.assertNotIn("Memory:", messages)
 
     async def test_monitor_restriction_uses_one_clone_and_edits_with_original_actor(
         self,

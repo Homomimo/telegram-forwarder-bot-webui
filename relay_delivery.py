@@ -112,7 +112,7 @@ async def plan(bot, task, export):
     return resolved, batches
 
 
-async def clone(bot, task, channel, ids, target=None, actor=None):
+async def clone(bot, task, channel, ids, target=None, actor=None, *, progress=None):
     request = SimpleNamespace(
         channel=channel, ids=ids, grouped=len(ids) > 1, target=target, actor=actor
     )
@@ -120,14 +120,19 @@ async def clone(bot, task, channel, ids, target=None, actor=None):
     args, receipt, token = prepare_clone(
         bot.console_data, bot.tdl.tdl_path, {"id": task.job_id, "dest": dest}, request
     )
-    code, _, _ = await bot.tdl._run_command(args)
+    if progress is not None:
+        code, _, _ = await bot.tdl._run_command([*args, "--disable-progress-ps"], progress)
+    else:
+        code, _, _ = await bot.tdl._run_command(args)
     if code:
         raise Uncertain("TDL clone 未获完整回执，请核对目标频道；不自动重发")
     return read_receipts(receipt, token, channel, dest, ids, target, actor)
 
 
-async def publish(bot, task, route, channel, batches, mark, delivery):
-    for ids in batches:
+async def publish(bot, task, route, channel, batches, mark, delivery, *, progress=None):
+    total = sum(map(len, batches))
+    confirmed = 0
+    for index, ids in enumerate(batches, start=1):
         if route:
             client, source, target, _ = route
             nonces = {mid: secrets.randbits(63) or 1 for mid in ids}
@@ -161,9 +166,18 @@ async def publish(bot, task, route, channel, batches, mark, delivery):
                     raise Uncertain(
                         "原生转发回执不完整，已停止后续任务；不会自动换通道重发"
                     )
+                confirmed += len(pairs)
                 continue
         delivery.route = "原生转发 / TDL clone（禁转回退）" if route else "TDL clone"
         task.manual_meta["route"] = delivery.route
         bot.task_queue.journal.save(task, "sending")
+        options = {}
+        if progress is not None:
+            async def report(record=None):
+                await progress(confirmed, total, index, len(batches), record)
+            await report()
+            options["progress"] = report
         mark(dict.fromkeys(ids, UNKNOWN))
-        mark(await clone(bot, task, channel, ids))
+        pairs = await clone(bot, task, channel, ids, **options)
+        mark(pairs)
+        confirmed += len(pairs)
