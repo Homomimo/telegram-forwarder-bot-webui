@@ -527,10 +527,10 @@ class IntegratedTests(fixtures.MonitorHarness, unittest.IsolatedAsyncioTestCase)
             cmd = reply.await_args.args[0].splitlines()[-1].split()
             self.assertEqual(cmd, ["/monitor", "add", "2345678901"])
             await bot.run_admin_action(event, cmd, reply)
-            await bot.run_admin_action(
-                event, ["/monitor", "set", "-1002345678901,2345678901"], reply
-            )
-        self.assertEqual(bot.monitor_chat_ids, [2345678901])
+            for removed in (["/monitor", "set", "@test_news,2345678901"], ["/monitor", "clear"]):
+                await bot.run_admin_action(event, removed, reply)
+                self.assertIn("未知 /monitor 子命令", reply.await_args.args[0])
+                self.assertEqual(bot.monitor_chat_ids, [SOURCE, 2345678901])
         bot.client.get_entity.assert_awaited_once_with("@test_news")
 
     async def test_public_lookup_rejects_nonchannel_and_invite_never_reaches_client(

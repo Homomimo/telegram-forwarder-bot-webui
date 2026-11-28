@@ -112,7 +112,6 @@
 | 打开管理面板 / 分步向导 | `/start` · `/help` |
 | 查看 / 切换目标 | `/showto` · `/forwardto 1234567890` |
 | 查看 / 增删监听源 | `/monitor` · `/monitor add 9876543210` · `/monitor del 9876543210` |
-| 替换 / 清空监听列表 | `/monitor set <源ID1,源ID2>` · `/monitor clear` |
 | 原地同步已映射的帖子 | `/resync 9876543210 42` |
 | 批量转发历史范围（含两端） | `/export_range 9876543210 100 200` |
 | 查看队列 / 停止手动任务 | `/queue`（按提示用 `/queue <任务ID>` 查看更早的待核对记录）· `/tdlstop` |

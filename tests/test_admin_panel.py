@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock, patch
@@ -433,13 +434,17 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.button('暂存文件列表'))
         self.assertFalse(await self.bot.admin_panel.file_download_ready(UID, job, '重复回执'))
 
-    async def test_protected_album_download_is_handled_by_tdl(self):
+    async def test_protected_album_download_preserves_filenames_and_channel_prefix(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         staging = self.bot.file_staging = FileStaging(self.bot, root, root)
-        posts = [photo(mid, group=123) for mid in (99, 100)]
+        posts = [photo(mid, group=123) for mid in (99, 100, 101)]
         for post in posts:
             post.noforwards = True
-        self.client.get_entity.return_value = NS(noforwards=True)
+        for post in (posts[0], posts[2]):
+            post.media = types.MessageMediaDocument(document=types.Document(
+                post.id, 1, b'ref', datetime.now(timezone.utc), 'video/mp4', 8, 2,
+                [types.DocumentAttributeFilename('原始 片段.mp4')]))
+        self.client.get_entity.return_value = NS(noforwards=True, title='素材库/归档')
         self.client.get_messages.side_effect = lambda peer, *, ids: posts if isinstance(ids, list) else posts[0]
 
         async def write_media(link, path):
@@ -450,10 +455,21 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         job = staging.enqueue_download(UID, link, album=True)
         await staging.download(job, {'link': link, 'album': True})
         self.assertEqual([call.args[0] for call in download.await_args_list],
-                         [link, f'https://t.me/c/{SOURCE}/100'])
-        self.client.get_entity.assert_not_awaited()
-        self.assertEqual(staging.files()[2], 2)
+                         [link, f'https://t.me/c/{SOURCE}/100', f'https://t.me/c/{SOURCE}/101'])
+        self.client.get_entity.assert_awaited_once()
+        items, _, count = staging.files()
+        self.assertEqual(count, 3)
+        self.assertEqual({item['name'] for item in items},
+                         {'素材库_归档_99_原始 片段.mp4', '素材库_归档_100_照片.jpg', '素材库_归档_101_原始 片段.mp4'})
+        folder = root / f'relay-job-{job}'
+        self.assertEqual({path.name for path in folder.iterdir()}, {item['name'] for item in items})
+        for item in items:
+            with staging.open_media(staging.get(item['id'])) as media:
+                self.assertEqual(media.read(), b'12345678')
         self.assertEqual(staging.recent(UID)[0][2], 'done')
+        removed, skipped, failed = staging.clean({item['id'] for item in items})
+        self.assertEqual((len(removed), skipped, failed), (3, 0, 0))
+        self.assertFalse(folder.exists())
 
     async def test_file_cleanup_keeps_unselected_downloads(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -839,18 +855,16 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('➕ 添加')
         self.assert_input_receipt(await self.reply('12345'), '已添加自动监听源频道：12345')
         self.assertIn(12345, self.bot.monitor_chat_ids)
-        await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('替换整个列表')
-        self.assert_input_receipt(await self.reply('123，456,123'), '123, 456')
-        self.assertNotIn(456, self.bot.monitor_chat_ids)
-        await self.click('确认执行'); self.assertEqual(self.bot.monitor_chat_ids, [123,456])
-        await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('➖ 点选移除')
-        await self.click('123'); await self.click('确认执行'); self.assertEqual(self.bot.monitor_chat_ids, [456])
-        await self.click('⬅️ 返回面板'); await self.click('📡 监听频道'); await self.click('清空监听…')
+        await self.click('⬅️ 返回面板'); await self.click('📡 监听频道')
+        labels = {button.text for row in self.page.buttons for button in row}
+        self.assertEqual(labels, {'🔀 频道配对', '➕ 添加', '➖ 点选移除', '🔄 刷新', '⬅️ 返回面板'})
+        await self.click('➖ 点选移除'); await self.click('12345')
         cancelled = await self.click('取消')
         self.assertIn('已取消', cancelled.answer.await_args.args[0])
-        self.assertEqual(self.bot.monitor_chat_ids, [456])
-        await self.click('📡 监听频道'); await self.click('清空监听…'); await self.click('确认执行')
-        self.assertEqual(self.bot.monitor_chat_ids, [])
+        self.assertEqual(self.bot.monitor_chat_ids, [SOURCE, 12345])
+        await self.click('📡 监听频道'); await self.click('➖ 点选移除')
+        await self.click('12345'); await self.click('确认执行')
+        self.assertEqual(self.bot.monitor_chat_ids, [SOURCE])
 
     async def test_stop_clear_history_and_restart_require_fresh_confirmation(self):
         self.bot._restart = AsyncMock()
@@ -906,7 +920,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assert_input_receipt(invalid, '无效')
 
     async def test_changed_monitor_list_and_authorization_in_flight(self):
-        await self.click('📡 监听频道'); await self.click('清空监听…')
+        await self.click('📡 监听频道'); await self.click('➖ 点选移除'); await self.click(str(SOURCE))
         self.bot.monitor_chat_ids.append(123)
         await self.click('确认执行')
         self.assertIn('已改变', self.page.raw_text)

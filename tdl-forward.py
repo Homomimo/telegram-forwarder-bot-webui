@@ -1074,8 +1074,6 @@ https://t.me/channel_name/42
 /channelname <ID> <备注> — 设置目标或监听频道的备注；用 - 清除
 /monitor — 查看监听列表
 /monitor del <裸ID> — 移除一个监听源
-/monitor set <ID1,ID2> — 替换整个监听列表
-/monitor clear — 清空监听列表
 
 🛠 任务与维护
 /queue — 查看任务明细；/queue done <任务ID> 或 /queue done all 移除待核对记录
@@ -1185,11 +1183,6 @@ def parse_export_range_args(parts: list[str]) -> tuple[Optional[int], Optional[i
 
 def parse_monitor_chat_id(text: str) -> Optional[int]:
     return parse_chat_id(text)
-
-
-def parse_monitor_list(raw: str) -> Optional[list[int]]:
-    ids = [parse_monitor_chat_id(item) for item in raw.replace('，', ',').split(',')]
-    return None if None in ids else list(dict.fromkeys(ids))
 
 
 def parse_chat_ids(raw: str) -> list[int]:
@@ -2052,22 +2045,6 @@ class TelegramBot:
             raise ValueError('这个用户名不是广播频道，未保存。')
         return entity.id, entity.title
 
-    async def resolve_channel_list(self, value: str):
-        ids, titles, resolved = {}, {}, {}
-        for part in value.replace('，', ',').split(','):
-            peer = parse_reference(part).peer
-            if isinstance(peer, int):
-                cid = peer
-            else:
-                if peer not in resolved:
-                    if len(resolved) >= 10:
-                        raise ValueError('一次最多查询 10 个公开用户名；可改用频道 ID。')
-                    resolved[peer] = await self.resolve_channel(part)
-                cid, title = resolved[peer]
-                titles[cid] = title
-            ids[cid] = None
-        return list(ids), titles
-
     def channel_label(self, chat_id: int | None, *, name_limit=None) -> str:
         if not chat_id:
             return '未设置'
@@ -2259,9 +2236,7 @@ class TelegramBot:
                 "ℹ️ 尚未配置自动监听源频道\n\n"
                 "用法：\n"
                 "/monitor add <源频道>\n"
-                "/monitor del <源频道>\n"
-                "/monitor set <频道1,频道2>\n"
-                "/monitor clear"
+                "/monitor del <源频道>"
             )
         total = len(self.monitor_chat_ids)
         lines = [f"📡 当前自动监听源频道（共 {total} 个）：\n"]
@@ -3168,26 +3143,20 @@ class TelegramBot:
         slot = None
         if (command == '/forwardto' and len(parts) == 2) or (command == '/channelname' and len(parts) >= 3):
             slot = 1
-        elif command == '/monitor' and len(parts) >= 3 and parts[1].lower() in ('add', 'del', 'delete', 'remove', 'set'):
+        elif command == '/monitor' and len(parts) >= 3 and parts[1].lower() in ('add', 'del', 'delete', 'remove'):
             slot = 2
         if slot is not None:
             args = list(parts)
             try:
-                if command == '/monitor' and parts[1].lower() == 'set':
-                    ids, titles = await self.resolve_channel_list(' '.join(parts[slot:]))
-                    args[slot:] = [','.join(map(str, ids))]
-                else:
-                    cid, title = await self.resolve_channel(parts[slot])
-                    titles = {cid: title} if title else {}
-                    args[slot] = str(cid)
+                cid, title = await self.resolve_channel(parts[slot])
+                args[slot] = str(cid)
             except ValueError as exc:
                 await respond(f'❌ {exc}')
                 return True
-            if titles:
-                listing = '\n'.join(f'{title}（{cid}）' for cid, title in titles.items())
-                text = '已识别频道，未验证读写权限，尚未修改设置：\n' + listing + '\n确认后发送：\n' + ' '.join(args)
+            if title:
+                text = f'已识别频道，未验证读写权限，尚未修改设置：\n{title}（{cid}）\n确认后发送：\n' + ' '.join(args)
                 if len(text.encode('utf-16-le')) > 8000:
-                    text = '列表太长，无法完整确认。请分批添加频道。'
+                    text = '输入太长，无法完整确认。请缩短内容后重试。'
                 await respond(text)
                 return True
             parts = args
@@ -3308,14 +3277,6 @@ class TelegramBot:
                 return True
 
             action = parts[1].lower()
-            if action == 'clear':
-                if len(parts) != 2:
-                    await respond("❌ /monitor clear 不接受其他参数，监听列表未更改")
-                    return True
-                self.update_channels(sources=[])
-                await respond("✅ 已清空自动监听源频道列表")
-                return True
-
             if action in ('add', 'del', 'delete', 'remove'):
                 if len(parts) != 3:
                     await respond(
@@ -3346,30 +3307,12 @@ class TelegramBot:
                     await respond(f"ℹ️ 该频道不在监听列表中：{label}")
                 return True
 
-            if action == 'set':
-                if len(parts) < 3:
-                    await respond(
-                        "❌ 缺少频道 ID 列表\n\n"
-                        "用法：/monitor set <频道1,频道2>\n"
-                        "示例：/monitor set 1234567890,9876543210"
-                    )
-                    return True
-                ids = parse_monitor_list(" ".join(parts[2:]))
-                if ids is None:
-                    await respond("❌ 列表中有空项或无效频道 ID，原监听列表未更改。请用逗号分隔频道。")
-                    return True
-                self.update_channels(sources=ids)
-                await respond(f"✅ 已覆盖自动监听源频道列表\n\n{self.format_monitor_chat_ids()}")
-                return True
-
             await respond(
                 "❌ 未知 /monitor 子命令\n\n"
                 "可用命令：\n"
                 "/monitor\n"
                 "/monitor add <源频道>\n"
-                "/monitor del <源频道>\n"
-                "/monitor set <频道1,频道2>\n"
-                "/monitor clear"
+                "/monitor del <源频道>"
             )
             return True
 
