@@ -542,14 +542,9 @@ class AdminPanel:
             await self._screen(s, f'📥 下载任务 #{job} 已入队。完成后 Bot 会通知。', [
                 [('查看文件任务', 'files:jobs'), ('返回下载暂存', 'files:downloads')], BACK])
         elif action == 'jobs':
-            states = {'pending': '等待执行', 'working': '执行中', 'sending': '发送中',
-                      'done': '已完成', 'failed': '失败', 'review': '待核对'}
-            lines = ['文件任务']
-            for job, kind, state, result in staging.recent(s.owner):
-                label = '下载' if kind == 'download' else '历史发布'
-                lines.append(f'\n#{job} {label} · {states[state]}' + (f'\n{result}' if result else ''))
-            await self._screen(s, '\n'.join(lines) if len(lines) > 1 else '暂无文件任务。', [
+            await self._screen(s, self._file_jobs_text(s.owner), [
                 [('刷新', 'files:jobs'), ('返回下载暂存', 'files:downloads')], BACK])
+            s.stage = 'file-jobs'
         elif action in ('list', 'toggle'):
             if action == 'toggle':
                 file_id, page = args
@@ -603,10 +598,41 @@ class AdminPanel:
         rows.append([('返回下载暂存', 'files:downloads'), *BACK])
         await self._screen(s, '\n'.join(lines), rows)
 
+    def _file_jobs_text(self, owner):
+        states = {'pending': '等待执行', 'working': '执行中', 'sending': '发送中',
+                  'done': '已完成', 'failed': '失败', 'review': '待核对'}
+        lines = ['文件任务']
+        for job, kind, state, result in self.bot.file_staging.recent(owner):
+            label = '下载' if kind == 'download' else '历史发布'
+            lines.append(f'\n#{job} {label} · {states[state]}' + (f'\n{result}' if result else ''))
+        return '\n'.join(lines) if len(lines) > 1 else '暂无文件任务。'
+
+    async def file_download_progress(self, owner, job, progress):
+        async with self._lock(owner):
+            s = self.sessions.get(owner)
+            if not self.allowed(owner) or not s or not s.mid or s.stage not in ('file-jobs', f'file-wait:{job}'):
+                return False
+            text = self._file_jobs_text(owner) if s.stage == 'file-jobs' else f'📥 下载任务 #{job}\n\n{progress}'
+            try:
+                # Omit reply markup so existing callback buttons keep their original tokens.
+                await self.bot.client.edit_message(owner, s.mid, self._fit(text), parse_mode=None, link_preview=False)
+            except errors.MessageNotModifiedError:
+                pass
+            return True
+
     async def file_download_ready(self, owner, job, result):
         async with self._lock(owner):
             s = self.sessions.get(owner)
-            if not self.allowed(owner) or not s or s.stage != f'file-wait:{job}':
+            if not self.allowed(owner) or not s:
+                return False
+            if s.stage == 'file-jobs' and s.mid:
+                try:
+                    await self.bot.client.edit_message(owner, s.mid, self._fit(self._file_jobs_text(owner)),
+                                                       parse_mode=None, link_preview=False)
+                except errors.MessageNotModifiedError:
+                    pass
+                return True
+            if s.stage != f'file-wait:{job}':
                 return False
             old_choices = s.choices
             try:

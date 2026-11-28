@@ -33,6 +33,7 @@ import manual_forward
 import relay_delivery
 import accounts
 from admin_panel import AdminPanel, Session as PanelSession
+from file_staging import size_label, tdl_transfer_bytes
 from queue_view import queue_excerpt, render_queue_status
 from task_journal import TaskJournal
 from monitor_clone import AlbumNotReady, read_members, media_key, source_posts, upload_batch, uploaded_media_key, publish_request, receipt_pairs
@@ -802,12 +803,24 @@ class TaskQueue:
 
         async def progress(line):
             nonlocal last_update
+            clean = self._clean_progress_line(line)
+            if not clean or re.search(r'\b(?:CPU|Memory|Goroutines):', clean):
+                return
             now = time.monotonic()
             if msg is None or (last_update is not None and now - last_update < 2):
                 return
             last_update = now
-            text = "\n".join([title, *details, "", "进度输出：", self._clean_progress_line(line)])
+            text = "\n".join([title, *details, "", "进度：", clean])
             await edit_status(msg, text[:3900])
+
+        async def clone_progress(confirmed, total, batch, batches, record):
+            amount = None if record is None else tdl_transfer_bytes(record)
+            if record is not None and amount is None:
+                return
+            text = f'TDL clone · 正在发送第 {batch}/{batches} 批\n已确认 {confirmed}/{total} 条'
+            if amount is not None:
+                text += f'\n当前传输：{size_label(amount)}'
+            await progress(text)
 
         is_range = task.mode == 'export_range'
         d = Delivery('范围转发' if is_range else '手动转发', '未发布')
@@ -886,7 +899,7 @@ class TaskQueue:
                     task.manual_meta = None  # No publication started and no checkpoint committed.
                     raise
                 if integrated:
-                    await relay_delivery.publish(self.bot, task, route, source, batches, mark, d)
+                    await relay_delivery.publish(self.bot, task, route, source, batches, mark, d, progress=clone_progress)
                 elif route:
                     await manual_forward.publish(self.bot, route, ids, group, mark)
                 else:
@@ -1876,16 +1889,19 @@ class TDLDownloader:
         scope = (source, {mid}) if single and source and mid else None
         return await self._forward_receipt(cmd, progress_callback, single=single, scope=scope, target=int(to_arg))
 
-    async def download_media(self, link: str, output_file: str) -> None:
+    async def download_media(self, link: str, output_file: str, *, on_progress=None) -> None:
         # One explicit member, isolated directory, no album expansion or resume prompts.
         path = Path(output_file)
         cmd = [self.tdl_path, 'download', '--url', link, '--dir', str(path.parent),
                '--template', path.name, '--restart']
-        code, out, err = await self._run_command(cmd)
+        options = {'on_record': on_progress} if on_progress is not None else {}
+        code, out, err = await self._run_command(cmd, **options)
         if code or not path.is_file() or path.stat().st_size <= 0:
             raise ValueError(f'TDL 媒体下载失败：{(err or out)[-1000:]}')
 
     async def _forward_receipt(self, cmd, progress_callback, *, single=False, scope=None, target=None):
+        if progress_callback is not None:
+            cmd = [*cmd, '--disable-progress-ps']
         failed, definite = {}, set()
         clipped = overflow = False
         sample_limit = 32

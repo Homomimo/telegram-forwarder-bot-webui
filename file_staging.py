@@ -30,6 +30,9 @@ PREVIEW_TYPES = frozenset({
 })
 FILE_ID = re.compile(r'[1-9]\d{0,18}-[1-9]\d{0,9}')
 FILENAME_SEPARATORS = frozenset('/\\:*?"<>|')
+TDL_DOWNLOAD_STATS = re.compile(r'\[\s*([0-9]{1,15}(?:\.[0-9]{1,3})?) (B|KB|MB|GB|TB)(?=\s+in\s|;|\])')
+TERMINAL_ESCAPE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+PROGRESS_INTERVAL = 4
 
 
 def mounted_downloads():
@@ -90,6 +93,15 @@ def size_label(size):
     return f'{size / 1024**2:.1f} MB'
 
 
+def tdl_transfer_bytes(record):
+    # The transfer tracker reports cumulative bytes. Ignore resource stats and message counts.
+    matches = TDL_DOWNLOAD_STATS.findall(TERMINAL_ESCAPE.sub('', record))
+    if not matches:
+        return None
+    amount, unit = matches[-1]
+    return int(float(amount) * 1024 ** ('B', 'KB', 'MB', 'GB', 'TB').index(unit))
+
+
 class FileStaging:
     def __init__(self, bot, data, root):
         self.bot = bot
@@ -97,6 +109,7 @@ class FileStaging:
         self.db_path = data / 'file_staging.sqlite3'
         self.wake = asyncio.Event()
         self.worker = None
+        self.progress: dict[int, str] = {}
         # Keep the database on /data and the media under the independently mounted directory.
         with closing(self.connect()) as db, db:
             db.execute('CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY, job INTEGER NOT NULL, '
@@ -135,7 +148,8 @@ class FileStaging:
     def recent(self, owner):
         with closing(self.connect()) as db:
             rows = db.execute('SELECT id,kind,state,result FROM jobs WHERE owner=? ORDER BY id DESC LIMIT 5', (owner,))
-            return list(rows)
+            return [(job, kind, state, self.progress.get(job, result) if state == 'working' else result)
+                    for job, kind, state, result in rows]
 
     @staticmethod
     def decode_files(rows):
@@ -258,27 +272,45 @@ class FileStaging:
         items = [(p, media_info(p)) for p in posts]
         with tempfile.TemporaryDirectory(prefix=f'.relay-job-{job}-', dir=self.root) as working:
             working = Path(working)
-            for member, item in items:
+            for index, (member, item) in enumerate(items):
                 file_id = f'{job}-{member.id}'
                 name = staged_name(channel, item['name'], member.id)
                 temporary = working / f'.{member.id}.part'
                 source = f'https://t.me/c/{peer.channel_id}/{member.id}'
+                total = expected_size(member)
+                status = f'已完成 {index}/{len(items)} 项 · 当前第 {index + 1} 项\n{name}'
+                self.progress[job] = status + '\n正在等待 TDL 下载…'
                 while not accounts.runtime_lock.acquire(False):
                     await asyncio.sleep(0.05)
+                downloaded = 0
+                self.progress[job] = status + '\n正在下载…'
+
+                def on_progress(record):
+                    nonlocal downloaded
+                    amount = tdl_transfer_bytes(record)
+                    if amount is None or amount <= downloaded:
+                        return
+                    downloaded = amount
+                    if total:
+                        shown = size_label(min(downloaded, total))
+                        self.progress[job] = f'{status}\n{shown} / {size_label(total)} · {min(100, downloaded * 100 // total)}%'
+                    else:
+                        self.progress[job] = f'{status}\n已下载 {size_label(downloaded)}'
+
                 try:
                     try:
-                        await self.bot.tdl.download_media(source, str(temporary))
+                        await self.bot.tdl.download_media(source, str(temporary), on_progress=on_progress)
                     except ValueError:
                         raise ValueError('TDL 无法下载媒体。请核对 TDL 登录、源频道访问权限和暂存空间。') from None
                 finally:
                     accounts.runtime_lock.release()
                 info = temporary.lstat()
-                size = expected_size(member)
-                if not stat.S_ISREG(info.st_mode) or not info.st_size or (size and info.st_size != size):
+                if not stat.S_ISREG(info.st_mode) or not info.st_size or (total and info.st_size != total):
                     raise ValueError('下载文件不完整。')
                 temporary.rename(working / name)
                 item.update(id=file_id, name=name, storage_name=name, size=info.st_size,
                             link=source + ('?single' if post.grouped_id else ''))
+            self.progress[job] = f'已完成 {len(items)}/{len(items)} 项，正在整理暂存文件…'
             working.rename(destination)
             try:
                 with closing(self.connect()) as db, db:
@@ -293,6 +325,21 @@ class FileStaging:
     @staticmethod
     def finish(db, job, state, result):
         db.execute('UPDATE jobs SET state=?,result=? WHERE id=?', (state, result, job))
+
+    async def report_progress(self, owner, job):
+        last = None
+        while True:
+            await asyncio.sleep(PROGRESS_INTERVAL)
+            text = self.progress.get(job)
+            if not text or text == last:
+                continue
+            try:
+                if await asyncio.wait_for(self.bot.admin_panel.file_download_progress(owner, job, text), 5):
+                    last = text
+            except errors.FloodWaitError as exc:
+                await asyncio.sleep(exc.seconds)
+            except Exception:
+                logger.debug('文件任务 %s 的进度未能刷新', job, exc_info=True)
 
     async def run(self):
         while True:
@@ -315,6 +362,9 @@ class FileStaging:
                 continue
             job, owner, raw, attempts = row
             payload = json.loads(raw)
+            self.progress[job] = '正在读取频道和帖子…'
+            reporter = asyncio.create_task(self.report_progress(owner, job))
+            retrying = False
             try:
                 if not self.bot.admin_panel.allowed(owner):
                     raise ValueError('任务发起人已失去管理员权限。')
@@ -327,16 +377,27 @@ class FileStaging:
                     if attempts < 3:
                         db.execute("UPDATE jobs SET state='pending',ready=?,attempts=attempts+1,result=? WHERE id=?",
                                    (time.time() + max(1, exc.seconds), result, job))
-                        continue
-                    self.finish(db, job, 'failed', result)
+                        retrying = True
+                    else:
+                        self.finish(db, job, 'failed', result)
             except Exception as exc:
                 completed = False
                 logger.warning('文件任务 %s 未完成（%s）', job, type(exc).__name__)
                 with closing(self.connect()) as db, db:
                     result = str(exc)[:360] if isinstance(exc, ValueError) else '下载失败，请核对账号权限和暂存空间。'
                     self.finish(db, job, 'failed', result)
+            finally:
+                self.progress.pop(job, None)
+                reporter.cancel()
+                await asyncio.gather(reporter, return_exceptions=True)
             if self.bot.admin_panel.allowed(owner):
                 try:
+                    if not completed:
+                        status = result + ' 将自动重试。' if retrying else '下载未完成。\n' + result
+                        if await asyncio.wait_for(self.bot.admin_panel.file_download_progress(owner, job, status), 5):
+                            continue
+                        if retrying:
+                            continue
                     if completed:
                         if await self.bot.admin_panel.file_download_ready(owner, job, result):
                             continue
