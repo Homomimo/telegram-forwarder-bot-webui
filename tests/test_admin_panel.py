@@ -740,6 +740,29 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.page.raw_text, '转发进度见状态消息，也可在任务队列查看。')
         self.bot.do_forward.assert_not_awaited()
 
+    async def test_export_cancel_returns_home_without_accepting_late_replies(self):
+        for step in ('start', 'end', 'confirm'):
+            with self.subTest(step=step):
+                await self.click('📦 批量转发')
+                if step != 'start':
+                    await self.reply(f'https://t.me/c/{SOURCE}/100')
+                prompt = self.session.prompt_id
+                controls = self.session.sync_controls_mid
+                if step == 'confirm':
+                    await self.reply(f'https://t.me/c/{SOURCE}/110')
+                await self.click('⬅️ 取消并返回')
+                self.assertEqual(list(self.messages), [self.page.id])
+                self.assertNotIn(prompt, self.messages)
+                self.assertNotIn(controls, self.messages)
+                self.assertEqual(self.session.start_link, '')
+                self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
+                self.assertFalse(self.session.prompt_id)
+                with patch.object(self.bot.admin_panel, '_error_notice', new_callable=AsyncMock) as notice:
+                    await self.text(f'https://t.me/c/{SOURCE}/120', reply=prompt)
+                    notice.assert_awaited_once()
+                self.assertTrue(self.bot.task_queue.queue.empty())
+                self.bot.do_forward.assert_not_awaited()
+
     async def test_invalid_export_and_changed_destination_are_never_admitted(self):
         for case in ('wrong_channel', 'reversed', 'bad_link', 'changed_before_confirm'):
             with self.subTest(case=case):

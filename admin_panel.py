@@ -294,16 +294,16 @@ class AdminPanel:
             s = self.sessions.get(uid)
             if not self.allowed(uid):
                 return
-            sync_prompt = bool(s and s.prompt_id and s.sync_controls_mid
-                               and event.message_id == s.sync_controls_mid)
-            if not s or (event.message_id != s.mid and not sync_prompt) or event.data not in s.choices:
+            prompt_controls = bool(s and s.prompt_id and s.sync_controls_mid
+                                   and event.message_id == s.sync_controls_mid)
+            if not s or (event.message_id != s.mid and not prompt_controls) or event.data not in s.choices:
                 await event.answer('按钮已失效，请使用最新面板或发送 /start。', alert=True)
                 if s and event.message_id != s.mid:
                     await self._remove_old_keyboard(event)
                 return
             action = s.choices[event.data]
-            if sync_prompt:
-                await self._exit_sync_prompt(s, event)
+            if prompt_controls:
+                await self._exit_prompt(s, event)
                 return
             if action == 'webui':
                 await self._send_webui_link(s, event)
@@ -341,7 +341,7 @@ class AdminPanel:
                 else:
                     await self._unavailable(s)
 
-    async def _exit_sync_prompt(self, s, event):
+    async def _exit_prompt(self, s, event):
         choices = s.choices
         await event.answer()
         if not self.allowed(s.owner):
@@ -353,11 +353,11 @@ class AdminPanel:
                 await self._unavailable(s)
                 return
             s.choices = choices
-            logger.exception('无法从手动同步返回面板')
+            logger.exception('无法从输入提示返回面板')
             await self._error_notice(event.respond, '首页未能打开，请重试或发送 /start。')
             return
         self._end_wait(s)
-        s.stage, s.expires = '', 0
+        s.stage, s.expires, s.start_link = '', 0, ''
 
     async def _send_webui_link(self, s, event):
         if not self.webui_url:
@@ -407,6 +407,7 @@ class AdminPanel:
 
     async def _navigate(self, s, event, action):
         if action in ('home', 'cancel'):
+            s.start_link = ''
             await self._screen(s, *self.home_view(), replace=s.result_receipt)
         elif action == 'help':
             await self._screen(s, self.guide, [BACK])
@@ -782,16 +783,19 @@ class AdminPanel:
         if stage == 'file-download':
             await self._prompt_with_cancel(s, text, '📥 下载暂存\n\n回复 Telegram 帖子链接，输入 5 分钟内有效。')
             return
-        text += '\n5 分钟内有效；回复「取消」可退出。'
         if stage in ('export', 'end'):
+            step = '起始链接' if stage == 'export' else '结束链接'
             text += f'\n当前目标：{self.bot.channel_label(s.guard)}'
+            await self._prompt_with_cancel(s, text, f'📦 批量转发 · {step}\n\n输入 5 分钟内有效。', reply_to=reply_to)
+            return
+        text += '\n5 分钟内有效；回复「取消」可退出。'
         prompt = await self.bot.client.send_message(s.owner, text, buttons=Button.force_reply(single_use=True),
                                                     link_preview=False, reply_to=reply_to)
         await self._activate(s, prompt.id, 'prompt')
         s.prompt = prompt
         self._arm_wait(s)
 
-    async def _prompt_with_cancel(self, s, text, description):
+    async def _prompt_with_cancel(self, s, text, description, *, reply_to=None):
         client = self.bot.client
         controls = await client.send_message(
             s.owner, PROMPT + description,
@@ -801,7 +805,7 @@ class AdminPanel:
             self.journal.stage_panel(self.bot_id, s.owner, controls.id, 'sync-controls')
             # ForceReply must be the last new message so Telegram focuses the reply composer.
             prompt = await client.send_message(s.owner, text, buttons=Button.force_reply(single_use=True),
-                                               link_preview=False)
+                                               link_preview=False, reply_to=reply_to)
             await self._activate(s, prompt.id, 'prompt', controls_mid=controls.id)
         except Exception:
             if s.sync_controls_mid != controls.id:
@@ -982,8 +986,9 @@ class AdminPanel:
 
     async def _confirm(self, s, cmd, detail, *, event=None):
         s.command, s.guard = cmd, self._snapshot(cmd)
-        text = f'⚠️ 待确认 · 尚未执行\n\n{detail}\n\n请在 5 分钟内选择「确认执行」或「取消」。'
-        rows = [[('确认执行', 'confirm'), ('取消', 'cancel')]]
+        cancel_label = '⬅️ 取消并返回' if cmd[0] == '/export_range' else '取消'
+        text = f'⚠️ 待确认 · 尚未执行\n\n{detail}\n\n请在 5 分钟内选择「确认执行」或「{cancel_label}」。'
+        rows = [[('确认执行', 'confirm'), (cancel_label, 'cancel')]]
         if event is not None:
             # Put the actionable card next to the input, not above the ForceReply prompt.
             try:
