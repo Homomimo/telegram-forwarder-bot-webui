@@ -1089,6 +1089,11 @@ https://t.me/channel_name/42
 /start — 返回管理面板
 /help — 查看使用向导
 
+📁 暂存与发布
+「📥 下载暂存」输入原帖链接，可下载整组相册或单项。
+「📤 上传发布」可在私聊发送文件或从暂存区选用，编辑文案后确认发布。图片和视频最多 10 项一组。
+在 Bot 的暂存文件列表清理文件。WebUI 的「文件暂存区」可预览已下载的图片和视频。
+
 💡 频道设置支持裸 ID、标记 ID、@用户名和 t.me 链接。频道备注仅供显示。
 💡 网页与 Bot 共用频道配置；集成版挂载 /data 后重启仍保留。"""
 
@@ -1974,6 +1979,7 @@ class TelegramBot:
         self._admission_failures = deque(maxlen=20)
         self._admission_failure_count = 0
         self.task_queue = TaskQueue(self)
+        self.file_staging = None
         bot_id = BOT_TOKEN.partition(':')[0]
         self.admin_panel = AdminPanel(self, bot_id=int(bot_id) if bot_id.isdecimal() else 0,
                                       allowed=lambda uid: not self._stopping and uid in ADMIN_IDS,
@@ -2420,6 +2426,9 @@ class TelegramBot:
 
         @client.on(events.Album)
         async def monitor_album(event):
+            if (client is self.client and self.file_staging and event.chat_id == event.sender_id and not event.out
+                    and await self.admin_panel.accept_file_media(event.sender_id, event.chat_id, event.messages, album=True)):
+                return
             if selected():
                 await self.enqueue_monitor_post(event, event.messages)
 
@@ -3697,6 +3706,9 @@ class TelegramBot:
                 command = match[1].lower() if match else None
                 # Telegram may leave ForceReply selected when an administrator uses /start to recover.
                 private_start = command == '/start' and event.chat_id == event.sender_id and event.sender_id in ADMIN_IDS
+                if (self.file_staging and not private_start and event.chat_id == event.sender_id
+                        and await self.admin_panel.accept_file_media(event.sender_id, event.chat_id, [event.message])):
+                    return
                 if not private_start and await self.admin_panel.reply(event):
                     return  # Other prompt replies must never fall through to commands or forwarding.
                 if command:
@@ -3771,6 +3783,8 @@ class TelegramBot:
         self._startup_phase = '队列恢复'
         logger.info('[启动/队列] 正在恢复持久化任务')
         await self.task_queue.start()
+        if self.file_staging:
+            self.file_staging.start()
 
         self._startup_phase = '管理员通知'
         notified = 0
@@ -3805,6 +3819,8 @@ class TelegramBot:
     async def stop(self) -> None:
         self.begin_shutdown()
         # Stop publication and reap TDL before waiting for notifications or disconnecting its client.
+        if self.file_staging:
+            await self.file_staging.stop()
         await self.task_queue.stop()
         if self._admission_alert is not None:
             self._admission_alert.cancel()

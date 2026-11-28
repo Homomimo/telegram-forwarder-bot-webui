@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 import accounts
 from channel_input import numeric_channel, parse_reference
+from file_staging import PREVIEW_PAGE_SIZE, PREVIEW_TYPES
 from forward_records import post_channel_url, post_url
 import web_sessions
 
@@ -21,6 +22,25 @@ SESSIONS = web_sessions.SESSIONS
 def check(ok, message):
     if not ok:
         raise ValueError(message)
+
+
+def media_range(header, size):
+    if header is None:
+        return 0, size - 1
+    match = re.fullmatch(r"bytes=([0-9]{0,20})-([0-9]{0,20})", header)
+    if not match or not any(match.groups()):
+        raise ValueError("无效的媒体字节范围")
+    first, last = match.groups()
+    if not first:
+        length = int(last)
+        if length == 0:
+            raise ValueError("空的媒体字节范围")
+        return max(0, size - length), size - 1
+    start = int(first)
+    end = min(size - 1, int(last)) if last else size - 1
+    if end < start:
+        raise ValueError("媒体字节范围超出文件")
+    return start, end
 
 
 class Console:
@@ -250,7 +270,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", cookie)
         self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def allowed(self):
         authority = self.headers.get("Host", "")
@@ -270,6 +291,55 @@ class Handler(BaseHTTPRequestHandler):
         value = f"{web_sessions.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Secure"
         return value if age is None else value + f"; Max-Age={age}"
 
+    def staged_media(self, file_id):
+        staging = getattr(self.server.console.bot, "file_staging", None)
+        try:
+            item = staging.get(file_id) if staging else None
+            if not item or item["mime"] not in PREVIEW_TYPES:
+                return self.reply(404, {"error": "媒体文件不存在"})
+            stream = staging.open_media(item)
+        except (OSError, sqlite3.Error):
+            return self.reply(404, {"error": "媒体文件暂不可用"})
+        with stream:
+            size = item["size"]
+            ranges = self.headers.get_all("Range", [])
+            try:
+                if len(ranges) > 1:
+                    raise ValueError("只支持一个媒体字节范围")
+                start, end = media_range(ranges[0] if ranges else None, size)
+            except ValueError:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(206 if ranges else 200)
+            self.send_header("Content-Type", item["mime"])
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "private, no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            if ranges:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            stream.seek(start)
+            remaining = end - start + 1
+            try:
+                while remaining:
+                    chunk = stream.read(min(remaining, 256 * 1024))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except (ConnectionError, TimeoutError):
+                pass  # Seeking and closing the player routinely abort a previous request.
+
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_GET(self):
         if not self.allowed():
             return
@@ -283,6 +353,22 @@ class Handler(BaseHTTPRequestHandler):
             )
         if (path.startswith("/api/") or path == "/health") and not self.session():
             return self.reply(401, {"error": "请先登录工作台"})
+        if path == "/api/staged-files":
+            values = parse_qs(url.query, keep_blank_values=True).get("page", ["1"])
+            if len(values) != 1 or not re.fullmatch(r"[1-9][0-9]{0,8}", values[0]):
+                return self.reply(400, {"error": "页码必须是正整数"})
+            staging = getattr(self.server.console.bot, "file_staging", None)
+            try:
+                items, page, total = staging.files(preview=True, page=int(values[0]) - 1) if staging else ([], 0, 0)
+            except (OSError, sqlite3.Error):
+                return self.reply(503, {"error": "文件暂存区暂不可用"})
+            return self.reply(200, {
+                "configured": staging is not None, "page": page + 1, "total": total,
+                "pages": max(1, (total + PREVIEW_PAGE_SIZE - 1) // PREVIEW_PAGE_SIZE),
+                "items": [{key: item[key] for key in ("id", "name", "size", "mime")} for item in items],
+            })
+        if path.startswith("/api/staged-media/"):
+            return self.staged_media(path.removeprefix("/api/staged-media/"))
         if path == "/api/state":
             try:
                 return self.reply(200, self.server.console.dispatch("state"))
@@ -306,6 +392,7 @@ class Handler(BaseHTTPRequestHandler):
             "/app.js": ("app.js", "application/javascript"),
             "/glass.css": ("glass.css", "text/css"),
             "/prism.svg": ("prism.svg", "image/svg+xml"),
+            "/vendor/artplayer.js": ("vendor/artplayer.js", "application/javascript"),
             "/login": ("index.html", "text/html; charset=utf-8"),
         }
         if path not in files:

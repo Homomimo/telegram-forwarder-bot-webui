@@ -16,6 +16,7 @@ const paths = {
   home: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
   jobs: "M4 6h16 M4 12h16 M4 18h11",
   history: "M4 10a8 8 0 1 1 1 7 M4 4v6h6 M12 7v5l4 2",
+  staged: "M3 5h6l2 2h10v12H3z",
   settings:
     "M3 6h8m5 0h5 M3 12h2m5 0h11 M3 18h10m5 0h3 M12 3v6 M7 9v6 M15 15v6",
 };
@@ -100,21 +101,27 @@ let s,
 let mappings = null,
   mappingError = "",
   mappingRequest = 0;
+let staged = null,
+  stagedError = "",
+  stagedRequest = 0;
 const pages = {
   home: "工作台",
   jobs: "任务队列",
   history: "转发记录",
   mappings: "源帖映射",
   pairs: "频道配对",
+  staged: "文件暂存区",
   settings: "工作台设置",
 };
 function go(k) {
   const enteringMappings = k === "mappings" && page !== k;
+  const enteringStaged = k === "staged" && page !== k;
   page = Object.hasOwn(pages, k) ? k : "home";
   location.hash = page;
   setNavigation(false);
   draw();
   if (enteringMappings) loadMappings(1);
+  if (enteringStaged) loadStaged(1);
 }
 window.addEventListener("hashchange", () => {
   if (signedIn) go(location.hash.slice(1));
@@ -128,10 +135,11 @@ function draw() {
   if (!s) return;
   $("#version").textContent = s.version;
   $("#engine").textContent = "Bot 与网页共用队列";
+  $("#breadcrumb").textContent = pages[page];
   $("#nav").innerHTML = Object.entries(pages)
     .map(
       ([k, t]) =>
-        `<button class="navitem ${k === page ? "active" : ""}" data-act="${k}">${ico(k)}${t}</button>`,
+        `<button type="button" class="navitem ${k === page ? "active" : ""}" ${k === page ? 'aria-current="page"' : ""} data-act="${k}">${ico(k)}${t}</button>`,
     )
     .join("");
   const { queue: q, config, history } = s;
@@ -176,11 +184,17 @@ function draw() {
   );
   let body = "";
   if (page === "home") {
-    body += card(
-      "当前运行状态",
-      `${pair("默认目标", channelLabel(config.target))}${pair("排队 / 待核对", `${q.counts.queued} / ${s.review_total}`)}${pair("当前任务", q.current_task ? "#" + q.current_task.job_id : "空闲")}`,
-    );
-    body += card("最近转发", records(history.slice(0, 6)));
+    const metrics = [
+      ["settings", "默认目标频道", channelLabel(config.target)],
+      ["jobs", "排队任务", q.counts.queued],
+      ["jobs", "待人工核对", s.review_total],
+      ["jobs", "当前任务", q.current_task ? "#" + q.current_task.job_id : "空闲"],
+    ];
+    body += `<div class="metrics">${metrics.map(([route, label, value]) =>
+      `<a class="metric" href="#${route}"><span class="metric-label">${label}<span class="metric-icon">${ico(route)}</span></span><strong>${esc(value)}</strong></a>`).join("")}</div>`;
+    const recent = card("最近转发", records(history.slice(0, 6)), btn("history", "查看全部"));
+    const channels = card("频道配置", pair("监听源", s.sources.length) + pair("自动复制", s.pairing?.strict ? "严格一对一" : "默认目标频道"), btn("pairs", "频道配对"));
+    body += `<div class="dashboard-columns">${recent}${channels}</div>`;
   } else if (page === "jobs") {
     body +=
       card(
@@ -215,6 +229,8 @@ function draw() {
     }
     const clear = mappings?.total && !mappingError ? btn("clearMappings", "清理全部映射…") : "";
     body += card("已确认映射", content, btn("mappingPage", "刷新", "", mappings?.page || 1) + clear);
+  } else if (page === "staged") {
+    body = renderStaged();
   } else if (page === "pairs") {
     const { strict, rows, missing } = s.pairing;
     const status = strict ? "严格一对一已启用" : "准备切换 · 自动复制仍使用默认目标频道";
@@ -249,10 +265,150 @@ function draw() {
   const title = page === "mappings" ? "自动复制的源帖映射" : pages[page];
   const description = page === "mappings"
     ? "查看已确认自动复制的源帖及其对应的目标帖。点击链接可打开对应消息。"
-    : page === "pairs" ? "自动复制按配对发送。手动和批量转发使用默认目标。" : "请仅转发获授权的内容";
+    : page === "pairs" ? "自动复制按配对发送。手动和批量转发使用默认目标。"
+    : page === "staged" ? "预览由 Bot 下载暂存的图片和视频。" : "";
   $("#page").innerHTML =
-    `<div class="rowhead"><div><h1>${title}</h1><div class="sub">${description}</div></div>${btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
+    `<div class="rowhead"><div><h1>${title}</h1>${description ? `<div class="sub">${description}</div>` : ""}</div>${page === "staged" ? "" : btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
 }
+function stagedSize(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 ** 2).toFixed(1)} MB`;
+}
+const stagedUrl = (file) => "/api/staged-media/" + encodeURIComponent(file.id);
+const stagedImage = (file) => file.mime.startsWith("image/");
+function renderStaged() {
+  let content = '<p class="hint" role="status">正在读取暂存文件…</p>';
+  if (stagedError) content = `<p class="err" role="alert">${esc(stagedError)}</p>`;
+  else if (staged && !staged.configured) content = '<p class="hint">文件暂存区尚未配置。请为容器挂载 /downloads。</p>';
+  else if (staged && !staged.items.length) content = '<p class="hint">暂无可预览文件。请先在 Bot 点「📥 下载暂存」。</p>';
+  else if (staged) {
+    const tiles = staged.items.map((file) => {
+      const type = stagedImage(file) ? "图片" : "视频";
+      const preview = stagedImage(file)
+        ? `<img src="${stagedUrl(file)}" loading="lazy" alt="">`
+        : '<span class="video-mark" aria-hidden="true">▶</span>';
+      return `<button type="button" class="media-card" data-act="previewMedia" data-id="${esc(file.id)}" aria-label="预览${type}：${esc(file.name)}"><span class="thumbnail">${preview}</span><span class="media-name">${esc(file.name)}<small>${type} · ${stagedSize(file.size)}</small></span></button>`;
+    });
+    const { page: current, pages: totalPages, total } = staged;
+    const nav = totalPages > 1
+      ? `<div class="actions pagination">${current > 1 ? btn("stagedPage", "上一页", "", current - 1) : ""}<span>第 ${current} / ${totalPages} 页</span>${current < totalPages ? btn("stagedPage", "下一页", "", current + 1) : ""}</div>`
+      : "";
+    content = `<p class="hint">${total} 个文件</p><div class="media-grid">${tiles.join("")}</div>${nav}`;
+  }
+  return `<section class="card staging-panel">${head("已下载文件", btn("stagedPage", "刷新", "", staged?.page || 1))}${content}</section>`;
+}
+async function loadStaged(number) {
+  const epoch = authEpoch;
+  const request = ++stagedRequest;
+  stagedError = "";
+  try {
+    const response = await fetch(`/api/staged-files?page=${encodeURIComponent(number)}`, { cache: "no-store" });
+    if (epoch !== authEpoch || request !== stagedRequest) return;
+    if (response.status === 401) return loginScreen("会话已过期，请重新登录");
+    if (!response.ok) throw Error();
+    const result = await response.json();
+    if (epoch !== authEpoch || request !== stagedRequest) return;
+    staged = result;
+  } catch {
+    if (epoch !== authEpoch || request !== stagedRequest) return;
+    stagedError = "文件暂存区暂不可用，请刷新重试。";
+  }
+  if (page === "staged") draw();
+}
+let artScript, mediaPlayer, mediaFile, imageFiles, mediaEpoch = 0;
+const mediaDialog = $("#media-dialog");
+const mediaBody = $("#media-body");
+function loadArtPlayer() {
+  if (window.Artplayer) return Promise.resolve(window.Artplayer);
+  if (!artScript) artScript = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/artplayer.js";
+    function unavailable() {
+      artScript = null;
+      script.remove();
+      reject(Error("播放器加载失败"));
+    }
+    script.onload = () => window.Artplayer ? resolve(window.Artplayer) : unavailable();
+    script.onerror = unavailable;
+    document.head.append(script);
+  });
+  return artScript;
+}
+function disposeMedia() {
+  mediaEpoch++;
+  mediaPlayer?.destroy();
+  mediaPlayer = null;
+  mediaBody.replaceChildren();
+  mediaBody.className = "";
+}
+function mediaStatus(text) {
+  const message = document.createElement("p");
+  message.className = "media-status";
+  message.setAttribute("role", "status");
+  message.textContent = text;
+  mediaBody.append(message);
+}
+async function showStagedFile(file) {
+  disposeMedia();
+  const epoch = mediaEpoch;
+  mediaFile = file;
+  const image = stagedImage(file);
+  $("#media-title").textContent = file.name;
+  $("#media-detail").textContent = `${image ? "图片" : "视频"} · ${stagedSize(file.size)}`;
+  $("#media-controls").hidden = !image;
+  if (!mediaDialog.open) mediaDialog.showModal();
+  if (image) {
+    const position = imageFiles.indexOf(file);
+    $("#media-previous").disabled = position === 0;
+    $("#media-next").disabled = position + 1 === imageFiles.length;
+    $("#media-zoom").textContent = "放大";
+    $("#media-zoom").setAttribute("aria-pressed", "false");
+    mediaBody.className = "image-pane";
+    const picture = new Image();
+    picture.alt = file.name;
+    picture.onerror = () => {
+      if (epoch !== mediaEpoch) return;
+      picture.remove();
+      mediaStatus("图片暂不可用，可能已从暂存区清理。");
+    };
+    picture.src = stagedUrl(file);
+    mediaBody.append(picture);
+    return;
+  }
+  mediaStatus("正在加载播放器…");
+  try {
+    const ArtPlayer = await loadArtPlayer();
+    if (epoch !== mediaEpoch || !mediaDialog.open) return;
+    const box = document.createElement("div");
+    box.className = "player-box";
+    mediaBody.replaceChildren(box);
+    mediaPlayer = new ArtPlayer({
+      container: box, url: stagedUrl(file), lang: "zh-cn", theme: "#5284fd",
+      setting: true, playbackRate: true, fullscreen: true,
+      moreVideoAttr: { playsInline: true, preload: "metadata" },
+    });
+    mediaPlayer.on("video:error", () => {
+      if (epoch === mediaEpoch && !mediaBody.querySelector(".media-status"))
+        mediaStatus("当前浏览器无法播放此视频，或文件已从暂存区清理。");
+    });
+  } catch {
+    if (epoch !== mediaEpoch) return;
+    mediaBody.replaceChildren();
+    mediaStatus("播放器加载失败，请关闭预览后重试。");
+  }
+}
+$("#media-close").onclick = () => mediaDialog.close();
+mediaDialog.addEventListener("close", () => {
+  if (!mediaDialog.open) disposeMedia();
+});
+$("#media-previous").onclick = () => showStagedFile(imageFiles[imageFiles.indexOf(mediaFile) - 1]);
+$("#media-next").onclick = () => showStagedFile(imageFiles[imageFiles.indexOf(mediaFile) + 1]);
+$("#media-zoom").onclick = (event) => {
+  const zoomed = mediaBody.classList.toggle("zoomed");
+  event.currentTarget.textContent = zoomed ? "还原" : "放大";
+  event.currentTarget.setAttribute("aria-pressed", String(zoomed));
+};
 async function loadMappings(number) {
   const epoch = authEpoch;
   const request = ++mappingRequest;
@@ -283,7 +439,10 @@ async function refresh(force = false) {
     const next = await res.json();
     if (epoch !== authEpoch) return;
     s = next;
-    draw();
+    if (page === "staged" && $("#page .staging-panel")) {
+      $("#version").textContent = s.version;
+      $("#engine").textContent = "Bot 与网页共用队列";
+    } else draw();
   } catch {
     $("#engine").textContent = "连接中断，正在重试";
   } finally {
@@ -388,6 +547,14 @@ function confirmPair(id, action) {
     `确认${label}`, () => savePair(action, revision, { source: id }));
 }
 const handlers = {
+  stagedPage: loadStaged,
+  previewMedia: (id) => {
+    const files = staged?.items || [];
+    const file = files.find((item) => item.id === id);
+    if (!file) return;
+    imageFiles = files.filter(stagedImage);
+    showStagedFile(file);
+  },
   addPair: () => editPair(),
   editPair,
   togglePair: (id) => confirmPair(id, "toggle"),
@@ -632,6 +799,19 @@ function setNavigation(open) {
   $("#menu").setAttribute("aria-expanded", String(open));
   $("#menu").setAttribute("aria-label", open ? "关闭导航" : "打开导航");
 }
+function setTheme(dark) {
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  $("#theme").setAttribute("aria-pressed", String(dark));
+  $("#theme").textContent = dark ? "浅色模式" : "深色模式";
+}
+let savedTheme;
+try { savedTheme = localStorage.getItem("relay-theme"); } catch {}
+setTheme(savedTheme ? savedTheme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches);
+$("#theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme !== "dark";
+  setTheme(dark);
+  try { localStorage.setItem("relay-theme", dark ? "dark" : "light"); } catch {}
+};
 $("#menu").onclick = () =>
   setNavigation(!document.body.classList.contains("open"));
 $("#shade").onclick = () => setNavigation(false);
@@ -639,7 +819,7 @@ document.addEventListener("keydown", (event) => {
   if (
     event.key === "Escape" &&
     document.body.classList.contains("open") &&
-    !$("#dlg").open
+    !$("#dlg").open && !mediaDialog.open
   ) {
     setNavigation(false);
     $("#menu").focus();
@@ -656,8 +836,11 @@ function loginScreen(message = "") {
   page = "home";
   mappings = null;
   mappingError = "";
+  staged = null;
+  stagedError = "";
   setNavigation(false);
   if ($("#dlg").open) $("#dlg").close();
+  if (mediaDialog.open) mediaDialog.close();
   $("#workspace").hidden = true;
   $("#gate").hidden = false;
   $("#page").replaceChildren();

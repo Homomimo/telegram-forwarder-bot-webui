@@ -18,6 +18,7 @@ fi
 docker build --build-arg "APP_VERSION=$version" --tag "$image" --tag "$repository:latest" .
 docker run -d --name "$name" --init --restart unless-stopped --security-opt no-new-privileges \
   --log-opt max-size=10m --log-opt max-file=3 -p "$port:8765" -v /root/telegram-forwarder/data:/data \
+  -v /root/telegram-forwarder/downloads:/downloads \
   -e RELAY_VPS_IP -e "WEB_PORT=$port" \
   -e BOT_TOKEN -e ADMIN_IDS -e SUBMITTER_IDS -e API_ID -e API_HASH "$image"
 printf '在 Bot 私聊发送 /start，点击「打开 WebUI」获取登录链接。\n'
