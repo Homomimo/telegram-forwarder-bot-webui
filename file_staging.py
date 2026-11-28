@@ -7,8 +7,10 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import stat
+import tempfile
 import time
 
 from telethon import errors, types
@@ -27,6 +29,7 @@ PREVIEW_TYPES = frozenset({
     'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
 })
 FILE_ID = re.compile(r'[1-9]\d{0,18}-[1-9]\d{0,9}')
+FILENAME_SEPARATORS = frozenset('/\\:*?"<>|')
 
 
 def mounted_downloads():
@@ -52,14 +55,31 @@ def parse_link(link):
 def media_info(post):
     key = media_key(post)
     if key.startswith('photo:'):
-        return {'name': f'照片-{post.id}.jpg', 'mime': 'image/jpeg'}
+        return {'name': '照片.jpg', 'mime': 'image/jpeg'}
     if not key.startswith('document:'):
         raise ValueError('该消息没有可用的图片、视频或文件。')
     doc = post.media.document
     name = next((attr.file_name for attr in doc.attributes if isinstance(attr, types.DocumentAttributeFilename)), '')
     name = name.replace('\\', '/').rsplit('/', 1)[-1]
-    name = ''.join(c for c in name if c.isprintable()).strip()[:160] or f'文件-{post.id}'
-    return {'name': name, 'mime': doc.mime_type}
+    return {'name': name or '文件', 'mime': doc.mime_type}
+
+
+def filename_part(value):
+    return ''.join('_' if c in FILENAME_SEPARATORS or not c.isprintable() else c for c in value).strip(' .')
+
+
+def fit_filename(value, limit):
+    return value.encode('utf-8')[:limit].decode('utf-8', errors='ignore')
+
+
+def staged_name(channel, filename, message_id):
+    prefix = f'{fit_filename(filename_part(channel), 90)}_{message_id}_'
+    name = filename_part(filename) or '文件'
+    stem, extension = os.path.splitext(name)
+    if len(extension.encode('utf-8')) > 24:
+        stem, extension = name, ''
+    budget = 240 - len((prefix + extension).encode('utf-8'))
+    return (prefix + fit_filename(stem, budget) + extension).rstrip(' .')
 
 
 def size_label(size):
@@ -142,7 +162,7 @@ class FileStaging:
 
     def open_media(self, item):
         # Refuse symlinks and nonregular files even if the mounted directory was edited on the host.
-        fd = os.open(self.root / f'relay-{item["id"]}', os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+        fd = os.open(self.media_path(item), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
                      | getattr(os, 'O_NONBLOCK', 0))
         try:
             status = os.fstat(fd)
@@ -152,6 +172,20 @@ class FileStaging:
         except BaseException:
             os.close(fd)
             raise
+
+    def media_path(self, item):
+        file_id = item['id']
+        if not FILE_ID.fullmatch(file_id):
+            raise OSError('无效的暂存文件 ID')
+        name = item.get('storage_name')
+        if name is None:
+            return self.root / f'relay-{file_id}'
+        if not isinstance(name, str) or not name or filename_part(name) != name:
+            raise OSError('无效的暂存文件名')
+        directory = self.root / f'relay-job-{file_id.partition("-")[0]}'
+        if directory.is_symlink():
+            raise OSError('暂存目录不可用')
+        return directory / name
 
     def cleanup_candidates(self, ids=None):
         with closing(self.connect()) as db:
@@ -163,12 +197,18 @@ class FileStaging:
         with closing(self.connect()) as db, db:
             for item in self.cleanup_candidates(ids):
                 try:
-                    (self.root / f'relay-{item["id"]}').unlink(missing_ok=True)
+                    path = self.media_path(item)
+                    path.unlink(missing_ok=True)
                 except OSError:
                     failed += 1
                     continue
                 db.execute('DELETE FROM files WHERE id=?', (item['id'],))
                 removed.append(item)
+                if path.parent != self.root:
+                    try:
+                        path.parent.rmdir()
+                    except OSError:
+                        pass  # Other downloads from this job may still be present.
         return removed, len(ids) - len(removed) - failed, failed
 
     async def source(self, link):
@@ -196,7 +236,18 @@ class FileStaging:
                 file_id = orphan.name.removeprefix('.').removeprefix('relay-').removesuffix('.part')
                 if FILE_ID.fullmatch(file_id):
                     orphan.unlink(missing_ok=True)
+        destination = self.root / f'relay-job-{job}'
+        for directory in (destination, *self.root.glob(f'.relay-job-{job}-*')):
+            if directory.exists() or directory.is_symlink():
+                shutil.rmtree(directory)
         client, peer, post = await self.source(payload['link'])
+        channel = getattr(getattr(post, 'chat', None), 'title', None)
+        if not channel:
+            try:
+                channel = getattr(await client.get_entity(peer), 'title', None)
+            except (ValueError, errors.ChannelPrivateError):
+                pass
+        channel = filename_part(channel or '') or str(peer.channel_id)
         posts = [post]
         if payload['album'] and post.grouped_id:
             ids = list(range(max(1, post.id - 19), min(2**31, post.id + 20)))
@@ -205,15 +256,13 @@ class FileStaging:
             if not 2 <= len(posts) <= MAX_ALBUM or post.id not in {p.id for p in posts}:
                 raise ValueError('无法完整读取相册，请重试或只下载单项。')
         items = [(p, media_info(p)) for p in posts]
-        written = []
-        try:
+        with tempfile.TemporaryDirectory(prefix=f'.relay-job-{job}-', dir=self.root) as working:
+            working = Path(working)
             for member, item in items:
                 file_id = f'{job}-{member.id}'
-                temporary = self.root / f'.relay-{file_id}.part'
-                destination = self.root / f'relay-{file_id}'
+                name = staged_name(channel, item['name'], member.id)
+                temporary = working / f'.{member.id}.part'
                 source = f'https://t.me/c/{peer.channel_id}/{member.id}'
-                written.append((temporary, destination))
-                temporary.unlink(missing_ok=True)
                 while not accounts.runtime_lock.acquire(False):
                     await asyncio.sleep(0.05)
                 try:
@@ -227,17 +276,18 @@ class FileStaging:
                 size = expected_size(member)
                 if not stat.S_ISREG(info.st_mode) or not info.st_size or (size and info.st_size != size):
                     raise ValueError('下载文件不完整。')
-                temporary.replace(destination)
-                item.update(id=file_id, size=info.st_size, link=source + ('?single' if post.grouped_id else ''))
-            with closing(self.connect()) as db, db:
-                db.executemany('INSERT INTO files(id,job,payload) VALUES(?,?,?)',
-                               [(item['id'], job, json.dumps(item)) for _, item in items])
-                self.finish(db, job, 'done', f'下载完成，已暂存 {len(items)} 项。')
-        except BaseException:
-            for temporary, destination in written:
-                temporary.unlink(missing_ok=True)
-                destination.unlink(missing_ok=True)
-            raise
+                temporary.rename(working / name)
+                item.update(id=file_id, name=name, storage_name=name, size=info.st_size,
+                            link=source + ('?single' if post.grouped_id else ''))
+            working.rename(destination)
+            try:
+                with closing(self.connect()) as db, db:
+                    db.executemany('INSERT INTO files(id,job,payload) VALUES(?,?,?)',
+                                   [(item['id'], job, json.dumps(item)) for _, item in items])
+                    self.finish(db, job, 'done', f'下载完成，已暂存 {len(items)} 项。')
+            except BaseException:
+                shutil.rmtree(destination)
+                raise
         return f'下载完成，已暂存 {len(items)} 项。'
 
     @staticmethod

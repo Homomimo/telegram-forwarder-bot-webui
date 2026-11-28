@@ -282,15 +282,38 @@ function stagedSize(size) {
   return `${(size / 1024 ** 2).toFixed(1)} MB`;
 }
 const stagedUrl = (file) => "/api/staged-media/" + encodeURIComponent(file.id);
+const stagedDownloadUrl = (file) => stagedUrl(file) + "?download=1";
 const stagedImage = (file) => file.mime.startsWith("image/");
 function setStagedLayout(layout) {
-  if (layout !== "list" && layout !== "grid") return;
+  if ((layout !== "list" && layout !== "grid") || layout === stagedLayout) return;
   stagedLayout = layout;
   const media = $("#page .staged-media");
-  if (media) media.dataset.layout = layout;
+  if (media) {
+    stopStagedThumbnails();
+    media.dataset.layout = layout;
+    media.innerHTML = renderStagedItems(staged.items);
+    if (!mediaDialog.open) loadStagedThumbnails();
+  }
   for (const button of document.querySelectorAll('#page [data-act="stagedLayout"]'))
     button.setAttribute("aria-pressed", String(button.dataset.id === layout));
   try { localStorage.setItem("relay-staged-layout", layout); } catch {}
+}
+
+function renderStagedItems(files) {
+  return files.map((file) => {
+    const type = stagedImage(file) ? "图片" : "视频";
+    let thumbnail = "";
+    if (stagedLayout === "grid") {
+      const preview = stagedImage(file)
+        ? `<img src="${stagedUrl(file)}" loading="lazy" alt="">`
+        : '<canvas class="video-thumbnail" aria-hidden="true" hidden></canvas><span class="video-mark" aria-hidden="true">▶</span>';
+      thumbnail = `<span class="thumbnail" aria-hidden="true">${preview}</span>`;
+    }
+    return `<article class="media-card">
+      <button type="button" class="media-open" data-act="previewMedia" data-id="${esc(file.id)}" aria-label="预览${type}：${esc(file.name)}">${thumbnail}<span class="media-name">${esc(file.name)}<small>${type} · ${stagedSize(file.size)}</small></span></button>
+      <a class="btn media-download" href="${stagedDownloadUrl(file)}" download aria-label="下载 ${esc(file.name)}">下载</a>
+    </article>`;
+  }).join("");
 }
 
 function renderStaged() {
@@ -300,13 +323,6 @@ function renderStaged() {
   else if (staged && !staged.configured) content = '<p class="hint">文件暂存区尚未配置。请为容器挂载 /downloads。</p>';
   else if (staged && !staged.items.length) content = '<p class="hint">暂无可预览文件。请先在 Bot 点「📥 下载暂存」。</p>';
   else if (staged) {
-    const tiles = staged.items.map((file) => {
-      const type = stagedImage(file) ? "图片" : "视频";
-      const preview = stagedImage(file)
-        ? `<img src="${stagedUrl(file)}" loading="lazy" alt="">`
-        : '<canvas class="video-thumbnail" aria-hidden="true" hidden></canvas><span class="video-mark" aria-hidden="true">▶</span>';
-      return `<button type="button" class="media-card" data-act="previewMedia" data-id="${esc(file.id)}" aria-label="预览${type}：${esc(file.name)}"><span class="thumbnail">${preview}</span><span class="media-name">${esc(file.name)}<small>${type} · ${stagedSize(file.size)}</small></span></button>`;
-    });
     const { page: current, pages: totalPages, total } = staged;
     const nav = totalPages > 1
       ? `<div class="actions pagination">${current > 1 ? btn("stagedPage", "上一页", "", current - 1) : ""}<span>第 ${current} / ${totalPages} 页</span>${current < totalPages ? btn("stagedPage", "下一页", "", current + 1) : ""}</div>`
@@ -314,7 +330,7 @@ function renderStaged() {
     const options = [["grid", "网格"], ["list", "列表"]];
     layoutControls = `<div class="media-layout" role="group" aria-label="文件排列方式">${options.map(([layout, label]) =>
       `<button type="button" class="btn" data-act="stagedLayout" data-id="${layout}" aria-pressed="${layout === stagedLayout}">${label}</button>`).join("")}</div>`;
-    content = `<p class="hint">${total} 个文件</p><div class="staged-media" data-layout="${stagedLayout}">${tiles.join("")}</div>${nav}`;
+    content = `<p class="hint">${total} 个文件</p><div class="staged-media" data-layout="${stagedLayout}">${renderStagedItems(staged.items)}</div>${nav}`;
   }
   const controls = `<div class="actions">${layoutControls}${btn("stagedPage", "刷新", "", staged?.page || 1)}</div>`;
   return `<section class="card staging-panel">${head("已下载文件", controls)}${content}</section>`;
@@ -332,7 +348,7 @@ function loadStagedThumbnails() {
     active = true;
     while (pending.length && !controller.signal.aborted) {
       const canvas = pending.shift();
-      const id = canvas.closest(".media-card").dataset.id;
+      const id = canvas.closest(".media-open").dataset.id;
       await drawVideoThumbnail(canvas, stagedUrl({ id }), controller.signal);
       if (!controller.signal.aborted) canvas.dataset.thumbnailTried = "";
     }
@@ -425,7 +441,7 @@ async function loadStaged(number) {
   }
   if (page === "staged") draw();
 }
-let artScript, mediaPlayer, mediaFile, imageFiles, mediaEpoch = 0;
+let artScript, mediaPlayer, mediaEpoch = 0;
 const mediaDialog = $("#media-dialog");
 const mediaBody = $("#media-body");
 function loadArtPlayer() {
@@ -449,7 +465,6 @@ function disposeMedia() {
   mediaPlayer?.destroy();
   mediaPlayer = null;
   mediaBody.replaceChildren();
-  mediaBody.className = "";
 }
 function mediaStatus(text) {
   const message = document.createElement("p");
@@ -462,30 +477,34 @@ async function showStagedFile(file) {
   stopStagedThumbnails();
   disposeMedia();
   const epoch = mediaEpoch;
-  mediaFile = file;
   const image = stagedImage(file);
   $("#media-title").textContent = file.name;
-  $("#media-detail").textContent = `${image ? "图片" : "视频"} · ${stagedSize(file.size)}`;
-  $("#media-controls").hidden = !image;
-  if (!mediaDialog.open) mediaDialog.showModal();
+  mediaDialog.classList.toggle("image-only", image);
+  $("#media-header").hidden = image;
   if (image) {
-    const position = imageFiles.indexOf(file);
-    $("#media-previous").disabled = position === 0;
-    $("#media-next").disabled = position + 1 === imageFiles.length;
-    $("#media-zoom").textContent = "放大";
-    $("#media-zoom").setAttribute("aria-pressed", "false");
-    mediaBody.className = "image-pane";
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "image-dismiss";
+    dismiss.setAttribute("aria-label", "关闭图片预览");
+    dismiss.onclick = () => mediaDialog.close();
     const picture = new Image();
     picture.alt = file.name;
     picture.onerror = () => {
       if (epoch !== mediaEpoch) return;
-      picture.remove();
-      mediaStatus("图片暂不可用，可能已从暂存区清理。");
+      dismiss.classList.add("media-status");
+      dismiss.textContent = "图片暂不可用，点击关闭。";
     };
     picture.src = stagedUrl(file);
-    mediaBody.append(picture);
+    dismiss.append(picture);
+    mediaBody.append(dismiss);
+    if (!mediaDialog.open) mediaDialog.showModal();
+    dismiss.focus();
     return;
   }
+  $("#media-download").href = stagedDownloadUrl(file);
+  $("#media-download").setAttribute("aria-label", `下载 ${file.name}`);
+  $("#media-detail").textContent = `视频 · ${stagedSize(file.size)}`;
+  if (!mediaDialog.open) mediaDialog.showModal();
   mediaStatus("正在加载播放器…");
   try {
     const ArtPlayer = await loadArtPlayer();
@@ -514,13 +533,6 @@ mediaDialog.addEventListener("close", () => {
   disposeMedia();
   if (signedIn && page === "staged") loadStagedThumbnails();
 });
-$("#media-previous").onclick = () => showStagedFile(imageFiles[imageFiles.indexOf(mediaFile) - 1]);
-$("#media-next").onclick = () => showStagedFile(imageFiles[imageFiles.indexOf(mediaFile) + 1]);
-$("#media-zoom").onclick = (event) => {
-  const zoomed = mediaBody.classList.toggle("zoomed");
-  event.currentTarget.textContent = zoomed ? "还原" : "放大";
-  event.currentTarget.setAttribute("aria-pressed", String(zoomed));
-};
 async function loadMappings(number) {
   const epoch = authEpoch;
   const request = ++mappingRequest;
@@ -665,7 +677,6 @@ const handlers = {
     const files = staged?.items || [];
     const file = files.find((item) => item.id === id);
     if (!file) return;
-    imageFiles = files.filter(stagedImage);
     showStagedFile(file);
   },
   addPair: () => editPair(),

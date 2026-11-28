@@ -97,18 +97,14 @@
       </form>
     </dialog>
     <dialog id="media-dialog" aria-labelledby="media-title">
-      <div class="modalhead">
+      <div class="modalhead" id="media-header">
         <div><h2 id="media-title"></h2><p id="media-detail" class="muted"></p></div>
-        <button id="media-close" type="button" class="btn" autofocus>关闭预览</button>
+        <div class="actions">
+          <a id="media-download" class="btn" download>下载</a>
+          <button id="media-close" type="button" class="btn" autofocus>关闭预览</button>
+        </div>
       </div>
       <div id="media-body"></div>
-      <div id="media-controls" class="modalfoot" hidden>
-        <div class="actions">
-          <button type="button" class="btn" id="media-previous">上一张</button>
-          <button type="button" class="btn" id="media-next">下一张</button>
-        </div>
-        <button type="button" class="btn" id="media-zoom" aria-pressed="false">放大</button>
-      </div>
     </dialog>
     <div id="toast" role="status"></div>
   </body>

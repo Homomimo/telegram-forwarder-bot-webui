@@ -7,7 +7,7 @@ import re
 import sqlite3
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 import accounts
 from channel_input import numeric_channel, parse_reference
 from file_staging import PREVIEW_PAGE_SIZE, PREVIEW_TYPES
@@ -291,7 +291,7 @@ class Handler(BaseHTTPRequestHandler):
         value = f"{web_sessions.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Secure"
         return value if age is None else value + f"; Max-Age={age}"
 
-    def staged_media(self, file_id):
+    def staged_media(self, file_id, *, download=False):
         staging = getattr(self.server.console.bot, "file_staging", None)
         try:
             item = staging.get(file_id) if staging else None
@@ -320,6 +320,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "private, no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            if download:
+                self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(item["name"], safe=""))
             if ranges:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
@@ -368,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
                 "items": [{key: item[key] for key in ("id", "name", "size", "mime")} for item in items],
             })
         if path.startswith("/api/staged-media/"):
-            return self.staged_media(path.removeprefix("/api/staged-media/"))
+            return self.staged_media(path.removeprefix("/api/staged-media/"), download=url.query == "download=1")
         if path == "/api/state":
             try:
                 return self.reply(200, self.server.console.dispatch("state"))

@@ -26,8 +26,7 @@ HOME = [[('📖 使用向导', 'help')],
 BACK = [('⬅️ 返回面板', 'home')]
 PAGES = {
     'target': ('/showto', [[('✏️ 更换目标', 'input:target')]]),
-    'monitor': ('/monitor', [[('🔀 频道配对', 'pairs:1')], [('➕ 添加', 'input:add'), ('➖ 点选移除', 'remove:0')],
-                             [('替换整个列表', 'input:set'), ('清空监听…', 'ask:monclear')]]),
+    'monitor': ('/monitor', [[('🔀 频道配对', 'pairs:1')], [('➕ 添加', 'input:add'), ('➖ 点选移除', 'remove:0')]]),
     'queue': ('/queue', [[('⏹ 停止任务…', 'ask:stop'), ('✅ 清空待核对…', 'ask:reviewclear')]]),
 }
 QUESTIONS = {
@@ -36,14 +35,12 @@ QUESTIONS = {
     'end': '已收到起始链接，尚未入队。第 2 步：请回复这条提示，粘贴同一源频道的结束原帖链接。',
     'target': '请回复目标频道的 ID、@用户名或 t.me 链接。',
     'add': '请回复监听频道的 ID、@用户名或 t.me 链接。',
-    'set': '请回复完整的新列表，用逗号分隔频道 ID、@用户名或 t.me 链接（这将替换旧列表）。',
     'pair-add': '请回复两个频道，用逗号分隔，顺序为「源频道,目标频道」。支持 ID、@用户名和 t.me 链接。',
     'pair-edit': '请回复新的目标频道 ID、@用户名或 t.me 链接。',
     'file-download': '请回复要下载的 Telegram 帖子链接，例如 https://t.me/c/1234567890/42。',
 }
 DANGERS = {
     'reviewclear': (('/queue', 'done', 'all'), '从列表移除全部待核对记录。不会删除频道消息，也不会重新发送。'),
-    'monclear': (('/monitor', 'clear'), '清空当前运行中的全部监听源。不会删除频道消息。'),
     'logclear': (('/flog', 'clear'), '清空全部本地转发记录。不会删除频道消息或同步映射。'),
     'mapclear': (('clear_mappings',), '清理全部已确认的源帖映射。源帖和目标帖会保留，'
                  '已清理的对应关系将无法用于自动编辑同步或手动同步，已复制的帖子不会因此重发。'),
@@ -821,17 +818,6 @@ class AdminPanel:
                 await self._confirm(s, ('/monitor', 'add', str(cid)), f'添加监听：{label}', event=event)
             else:
                 await self._execute(s, event, ('/monitor', 'add', str(cid)), self._snapshot(('/monitor',)), result)
-        elif stage == 'set':
-            try:
-                ids, titles = await self.bot.resolve_channel_list(value)
-            except ValueError as exc:
-                await result(f'❌ {exc}')
-                return
-            listing = ', '.join(f'{titles[cid]}（{cid}）' if cid in titles else str(cid) for cid in ids)
-            if len(listing) > 3200:
-                await result('列表太长，无法完整预览。请分批添加，或使用 /monitor set。')
-            else:
-                await self._confirm(s, ('/monitor', 'set', ','.join(map(str, ids))), f'替换整个监听列表，新列表：\n{listing}', event=event)
         else:
             await result('❌ 输入无效，未执行或投稿。请从面板重新开始。')
 
