@@ -8,7 +8,7 @@ from functools import partial
 from html import escape
 
 from telethon import Button, errors, types
-from file_staging import MAX_ALBUM, PAGE_SIZE as FILE_PAGE_SIZE, media_info, parse_link, size_label
+from file_staging import PAGE_SIZE as FILE_PAGE_SIZE, parse_link, size_label
 from forward_records import PAGE_SIZE, history_list, history_detail
 from web_sessions import LINK_TTL, SESSIONS
 
@@ -18,7 +18,7 @@ PREFIX = b'ap1:'
 PROMPT = '⌨️ 管理面板输入｜'
 TTL = 300
 HOME = [[('📖 使用向导', 'help')],
-        [('📥 下载暂存', 'files:downloads'), ('📤 上传发布', 'files:draft')],
+        [('📥 下载暂存', 'files:downloads')],
         [('🎯 目标频道', 'target'), ('📡 监听频道', 'monitor')],
         [('🔄 手动同步', 'input:sync'), ('📦 批量转发', 'input:export')],
         [('📋 任务队列', 'queue'), ('📝 转发记录', 'history')],
@@ -40,8 +40,6 @@ QUESTIONS = {
     'pair-add': '请回复两个频道，用逗号分隔，顺序为「源频道,目标频道」。支持 ID、@用户名和 t.me 链接。',
     'pair-edit': '请回复新的目标频道 ID、@用户名或 t.me 链接。',
     'file-download': '请回复要下载的 Telegram 帖子链接，例如 https://t.me/c/1234567890/42。',
-    'file-caption': '请回复要发布的文案。相册文案附在第一项。',
-    'file-target': '请回复本次发布的目标频道 ID、@用户名或 t.me 链接。',
 }
 DANGERS = {
     'reviewclear': (('/queue', 'done', 'all'), '从列表移除全部待核对记录。不会删除频道消息，也不会重新发送。'),
@@ -75,7 +73,6 @@ class Session:
     file_link: str = ''
     file_selection: set[str] = field(default_factory=set)
     file_cleanup: frozenset[str] = frozenset()
-    file_cleanup_skipped: int = 0
 
     @property
     def prompt_id(self):
@@ -537,11 +534,8 @@ class AdminPanel:
             return
         action, *args = parts
         if action == 'downloads':
-            last = staging.downloaded(s.owner)
             rows = [[('粘贴帖子链接', 'files:link'), ('查看文件任务', 'files:jobs')],
-                    [('暂存文件列表', 'files:pick:0')]]
-            if last:
-                rows.insert(1, [('选用最近下载的文件', 'files:use-last')])
+                    [('暂存文件列表', 'files:list:0')]]
             await self._screen(s, '📥 下载暂存\n\n从 Telegram 帖子下载到 /downloads。', rows + [BACK])
         elif action == 'link':
             await self._prompt(s, 'file-download')
@@ -549,7 +543,7 @@ class AdminPanel:
             if not s.file_link:
                 await self._result(s, '下载链接已失效，请重新输入。')
                 return
-            job = staging.enqueue(s.owner, 'download', {'link': s.file_link, 'album': action == 'album'})
+            job = staging.enqueue_download(s.owner, s.file_link, album=action == 'album')
             s.file_link = ''
             s.stage = f'file-wait:{job}'
             await self._screen(s, f'📥 下载任务 #{job} 已入队。完成后 Bot 会通知。', [
@@ -559,13 +553,12 @@ class AdminPanel:
                       'done': '已完成', 'failed': '失败', 'review': '待核对'}
             lines = ['文件任务']
             for job, kind, state, result in staging.recent(s.owner):
-                label = '下载' if kind == 'download' else '发布'
+                label = '下载' if kind == 'download' else '历史发布'
                 lines.append(f'\n#{job} {label} · {states[state]}' + (f'\n{result}' if result else ''))
             await self._screen(s, '\n'.join(lines) if len(lines) > 1 else '暂无文件任务。', [
                 [('刷新', 'files:jobs'), ('返回下载暂存', 'files:downloads')], BACK])
-        elif action in ('pick', 'toggle', 'clean', 'clean-toggle'):
-            cleanup = action.startswith('clean')
-            if action.endswith('toggle') or action == 'toggle':
+        elif action in ('list', 'toggle'):
+            if action == 'toggle':
                 file_id, page = args
                 if file_id in s.file_selection:
                     s.file_selection.remove(file_id)
@@ -573,141 +566,49 @@ class AdminPanel:
                     s.file_selection.add(file_id)
             else:
                 page = args[0]
-            await self._file_list(s, staging, int(page), cleanup=cleanup)
-        elif action in ('use-last', 'use-job', 'use-selected'):
-            draft = staging.draft(s.owner, create=True)
-            if action == 'use-selected':
-                files = [item for file_id in sorted(s.file_selection, key=lambda value: tuple(map(int, value.split('-'))))
-                         if (item := staging.get(file_id))]
-            else:
-                files = staging.downloaded(s.owner, int(args[0]) if args else None)
-            try:
-                if not files:
-                    raise ValueError('没有可加入的文件，请先选择暂存文件。')
-                added = draft.add(dict(item, source='staging', ref=item['id']) for item in files)
-            except ValueError as exc:
-                await self._file_draft(s, draft, str(exc))
-                return
-            s.file_selection.clear()
-            await self._file_draft(s, draft, f'已加入 {added} 项。')
+            await self._file_list(s, staging, int(page))
         elif action in ('clean-selected', 'clean-all'):
-            eligible, s.file_cleanup_skipped = staging.cleanup_candidates(
-                s.file_selection if action == 'clean-selected' else None)
+            eligible = staging.cleanup_candidates(s.file_selection if action == 'clean-selected' else None)
             s.file_cleanup = frozenset(item['id'] for item in eligible)
             if not eligible:
-                await self._file_list(s, staging, 0, cleanup=True, notice='没有可清理的所选文件。')
+                await self._file_list(s, staging, 0, notice='没有可清理的文件。')
                 return
             size = size_label(sum(item['size'] for item in eligible))
             await self._screen(s, f'🧹 确认清理暂存区\n\n将删除 {len(eligible)} 项，预计释放 {size}。'
-                               '\n正在下载、被草稿选中或正在发送的文件会跳过。', [
-                                   [('确认删除', 'files:delete'), ('取消', 'files:clean:0')]])
+                               '\n只清理已下载完成的文件。', [
+                                   [('确认删除', 'files:delete'), ('取消', 'files:list:0')]])
             s.expires = time.monotonic() + TTL
         elif action == 'delete':
             removed, skipped, failed = staging.clean(s.file_cleanup)
-            skipped += s.file_cleanup_skipped
             s.file_cleanup = frozenset()
-            s.file_cleanup_skipped = 0
             s.file_selection.clear()
             size = size_label(sum(item['size'] for item in removed))
             await self._screen(s, f'✅ 已清理 {len(removed)} 项，释放 {size}。\n跳过 {skipped} 项，失败 {failed} 项。', [
-                [('查看剩余文件', 'files:clean:0')], BACK])
-        elif action == 'discard':
-            staging.drafts.pop(s.owner, None)
-            await self._screen(s, *self.home_view())
+                [('查看剩余文件', 'files:list:0')], BACK])
         else:
-            draft = staging.draft(s.owner, create=action == 'draft')
-            if not draft:
-                await self._result(s, '发布草稿已过期，请重新开始。')
-                return
-            if action == 'receive':
-                await self._file_receive_screen(s, draft)
-            elif action in ('caption', 'target'):
-                await self._prompt(s, 'file-' + action)
-            elif action == 'clear-caption':
-                draft.caption = ''
-                await self._file_draft(s, draft)
-            elif action in ('remove', 'up', 'down'):
-                index = int(args[0])
-                if 0 <= index < len(draft.items):
-                    if action == 'remove':
-                        draft.items.pop(index)
-                    else:
-                        other = index + (-1 if action == 'up' else 1)
-                        if 0 <= other < len(draft.items):
-                            draft.items[index], draft.items[other] = draft.items[other], draft.items[index]
-                await self._file_draft(s, draft)
-            elif action in ('review', 'publish'):
-                if not draft.items or not draft.target:
-                    await self._file_draft(s, draft, '请选择至少一项并设置目标频道。')
-                elif action == 'review':
-                    await self._file_draft(s, draft, review=True)
-                    s.expires = time.monotonic() + TTL
-                else:
-                    job = staging.enqueue(s.owner, 'publish', staging.publication(draft))
-                    staging.drafts.pop(s.owner, None)
-                    await self._screen(s, f'📤 发布任务 #{job} 已入队。完成后 Bot 会通知。', [
-                        [('查看文件任务', 'files:jobs')], BACK])
-            else:
-                s.file_selection.clear()
-                await self._file_draft(s, draft)
+            await self._result(s, '操作已失效，请返回面板。')
 
-    async def _file_list(self, s, staging, page, *, cleanup, notice=''):
+    async def _file_list(self, s, staging, page, *, notice=''):
         files, page, total = staging.files(page=page)
-        title = '🧹 清理暂存区' if cleanup else '文件暂存区'
-        action = 'clean' if cleanup else 'pick'
-        toggle = 'clean-toggle' if cleanup else 'toggle'
-        available = {item['id'] for item in staging.cleanup_candidates()[0]} if cleanup else None
-        rows, lines = [], [f'{title} · {total} 项']
+        rows, lines = [], [f'暂存文件列表 · {total} 项']
         if notice:
             lines.append(notice)
         for index, item in enumerate(files, start=1):
             key = item['id']
-            locked = cleanup and key not in available
-            lines.append(f'{index}. {item["name"]} · {size_label(item["size"])}' + (' · 使用中' if locked else ''))
-            if not locked:
-                label = '☑️' if key in s.file_selection else '⬜'
-                rows.append([(f'{label} {index}. {item["name"][:40]}', f'files:{toggle}:{key}:{page}')])
+            lines.append(f'{index}. {item["name"]} · {size_label(item["size"])}')
+            label = '☑️' if key in s.file_selection else '⬜'
+            rows.append([(f'{label} {index}. {item["name"][:40]}', f'files:toggle:{key}:{page}')])
         nav = []
         if page:
-            nav.append(('上一页', f'files:{action}:{page-1}'))
+            nav.append(('上一页', f'files:list:{page-1}'))
         if (page + 1) * FILE_PAGE_SIZE < total:
-            nav.append(('下一页', f'files:{action}:{page+1}'))
+            nav.append(('下一页', f'files:list:{page+1}'))
         if nav:
             rows.append(nav)
-        rows.append([('删除所选', 'files:clean-selected'), ('清理全部未使用文件', 'files:clean-all')]
-                    if cleanup else [('加入所选文件', 'files:use-selected'), ('🧹 清理暂存区', 'files:clean:0')])
-        rows.append([('返回暂存列表', 'files:pick:0')] if cleanup else [('返回发布草稿', 'files:draft'), *BACK])
+        if total:
+            rows.append([('删除所选', 'files:clean-selected'), ('🧹 清理全部暂存文件', 'files:clean-all')])
+        rows.append([('返回下载暂存', 'files:downloads'), *BACK])
         await self._screen(s, '\n'.join(lines), rows)
-
-    async def _file_draft(self, s, draft, notice='', *, review=False, replace=False):
-        target = (f'{draft.target_title}（{draft.target}）' if draft.target_title else self.bot.channel_label(draft.target))
-        lines = ['确认发布' if review else '📤 上传发布', f'已选 {len(draft.items)}/{MAX_ALBUM} 项',
-                 f'目标频道：{target}', f'文案：{draft.caption or "未填写"}']
-        rows = []
-        for index, item in enumerate(draft.items):
-            origin = '暂存区' if item['source'] == 'staging' else 'Bot 私聊'
-            lines.append(f'{index+1}. {item["name"]} · {origin}')
-            if not review:
-                moves = []
-                if index:
-                    moves.append((f'↑ {index+1}', f'files:up:{index}'))
-                if index+1 < len(draft.items):
-                    moves.append((f'↓ {index+1}', f'files:down:{index}'))
-                rows.append([*moves, (f'移除第 {index+1} 项', f'files:remove:{index}')])
-        if notice:
-            lines.append(notice)
-        if review:
-            lines.append('发送方式：相册，文案附在第一项。' if len(draft.items) > 1 else '发送方式：单帖。')
-            rows = [[('确认发布', 'files:publish'), ('返回修改', 'files:draft')]]
-        else:
-            rows.extend([[('发送文件到 Bot', 'files:receive'), ('从暂存区选择', 'files:pick:0')],
-                         [('编辑文案', 'files:caption'), ('选择目标频道', 'files:target')]])
-            if draft.caption:
-                rows.append([('清空文案', 'files:clear-caption')])
-            if draft.items:
-                rows.append([('预览并确认', 'files:review')])
-            rows.append([('取消并返回', 'files:discard')])
-        await self._screen(s, '\n'.join(lines), rows, replace=replace)
 
     async def file_download_ready(self, owner, job, result):
         async with self._lock(owner):
@@ -717,50 +618,12 @@ class AdminPanel:
             old_choices = s.choices
             try:
                 await self._screen(s, f'✅ 文件任务 #{job}\n{result}', [
-                    [('选用这些文件', f'files:use-job:{job}')],
-                    [('暂存文件列表', 'files:pick:0'), ('返回下载暂存', 'files:downloads')], BACK])
+                    [('暂存文件列表', 'files:list:0'), ('返回下载暂存', 'files:downloads')], BACK])
             except Exception:
                 s.choices = old_choices
                 logger.warning('未能刷新已完成的下载面板', exc_info=True)
                 return False
             s.stage = ''
-            return True
-
-    async def _file_receive_screen(self, s, draft, notice=''):
-        s.stage, s.expires = 'file-media', 0
-        text = ('请直接在本私聊发送图片、视频或单个文件。发送完点击「返回草稿」。'
-                f'\n已选 {len(draft.items)}/{MAX_ALBUM} 项。')
-        await self._screen(s, text + (f'\n{notice}' if notice else ''), [
-            [('返回草稿', 'files:draft'), ('取消并返回', 'files:discard')]])
-
-    async def accept_file_media(self, owner, chat, posts, *, album=False):
-        staging = getattr(self.bot, 'file_staging', None)
-        if staging is None or owner != chat or not self.allowed(owner):
-            return False
-        async with self._lock(owner):
-            s = self.sessions.get(owner)
-            if not s or s.stage != 'file-media' or not self.allowed(owner):
-                return False
-            if not any(post.media and not isinstance(post.media, types.MessageMediaWebPage) for post in posts):
-                return False
-            if not album and posts[0].grouped_id:
-                return True  # The Album event admits all members together.
-            draft = staging.draft(owner)
-            if not draft:
-                await self._result(s, '发布草稿已过期，请重新开始。')
-                return True
-            try:
-                items = [dict(media_info(post), source='private', ref=post.id) for post in sorted(posts, key=lambda post: post.id)]
-                added = draft.add(items)
-                notice = f'已加入 {added} 项。'
-            except ValueError as exc:
-                notice = str(exc)
-            old_choices = s.choices
-            try:
-                await self._file_receive_screen(s, draft, notice)
-            except Exception:
-                s.choices = old_choices
-                logger.warning('未能刷新上传草稿面板', exc_info=True)
             return True
 
     def _snapshot(self, cmd):
@@ -883,30 +746,18 @@ class AdminPanel:
         if value == '取消':
             await result('已取消。', receipt_kind='command')
             return
-        if stage.startswith('file-'):
-            staging = self.bot.file_staging
+        if stage == 'file-download':
             s.stage, s.expires = '', 0
             try:
-                if stage == 'file-download':
-                    parse_link(value)
-                    s.file_link = value
-                    await self._screen(s, f'下载来源：{value}\n\n相册链接可下载整组，也可只下载这一项。', [
-                        [('下载整组', 'files:album'), ('只下载这一项', 'files:single')],
-                        [('取消', 'files:downloads')]], replace=True)
-                    s.expires = time.monotonic() + TTL
-                    return
-                draft = staging.draft(s.owner)
-                if not draft:
-                    raise ValueError('发布草稿已过期，请重新开始。')
-                if stage == 'file-caption':
-                    if len(value.encode('utf-16-le')) > 2048:
-                        raise ValueError('文案最多 1024 个 UTF-16 字符，请缩短后重新编辑。')
-                    draft.caption = value
-                else:
-                    draft.target, draft.target_title = await self.bot.resolve_channel(value)
-                await self._file_draft(s, draft, replace=True)
+                parse_link(value)
             except ValueError as exc:
                 await result(f'❌ {exc}')
+                return
+            s.file_link = value
+            await self._screen(s, f'下载来源：{value}\n\n相册链接可下载整组，也可只下载这一项。', [
+                [('下载整组', 'files:album'), ('只下载这一项', 'files:single')],
+                [('取消', 'files:downloads')]], replace=True)
+            s.expires = time.monotonic() + TTL
             return
         if ((stage == 'sync' and self._snapshot(('/resync',)) != s.guard)
                 or (stage in ('export', 'end') and self.bot.target_chat_id != s.guard)):

@@ -1,8 +1,10 @@
 """Drive the registered bot handlers with real Telethon keyboard objects, without a Telegram session."""
 import asyncio
 import itertools
+import json
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock, patch
@@ -376,7 +378,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guide_button.text, '📖 使用向导')
         self.assertEqual([[b.text for b in row.buttons] for row in markup.rows], [
             [label, '📖 使用向导'],
-            ['📥 下载暂存', '📤 上传发布'],
+            ['📥 下载暂存'],
             ['🎯 目标频道', '📡 监听频道'],
             ['🔄 手动同步', '📦 批量转发'],
             ['📋 任务队列', '📝 转发记录'],
@@ -425,33 +427,66 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         current = self.page.id
         self.assertTrue(await self.bot.admin_panel.file_download_ready(UID, job, '下载完成，已暂存 2 项。'))
         self.assertEqual(self.page.id, current)
-        self.assertTrue(self.button('选用这些文件'))
+        self.assertTrue(self.button('暂存文件列表'))
         self.assertFalse(await self.bot.admin_panel.file_download_ready(UID, job, '重复回执'))
 
-    async def test_upload_draft_consumes_media_and_confirmation_admits_once(self):
+    async def test_protected_album_download_is_handled_by_tdl(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.bot.file_staging = FileStaging(self.bot, root, root)
-        await self.click('📤 上传发布')
-        await self.click('发送文件到 Bot')
-        post = photo(500)
-        post.text, post.forward, post.post = '', True, False
-        post.peer_id, post.reply_to_msg_id = types.PeerUser(UID), None
-        event = NS(message=post, chat_id=UID, sender_id=UID, out=False, is_channel=False, raw_text='')
-        await self.new(event)
-        await self.new(event)
-        self.bot.do_forward.assert_not_called()
-        self.assertIn('1/10', self.page.raw_text)
-        await self.click('返回草稿')
-        await self.click('编辑文案')
-        await self.reply('发布文案')
-        await self.click('预览并确认')
-        confirmation, mid = self.button('确认发布'), self.page.id
-        await self.hit(confirmation, mid=mid)
-        await self.hit(confirmation, mid=mid)
-        staging = self.bot.file_staging
-        self.assertEqual(len(staging.recent(UID)), 1)
-        self.assertEqual(staging.recent(UID)[0][1:3], ('publish', 'pending'))
-        self.assertIsNone(staging.draft(UID))
+        staging = self.bot.file_staging = FileStaging(self.bot, root, root)
+        posts = [photo(mid, group=123) for mid in (99, 100)]
+        for post in posts:
+            post.noforwards = True
+        self.client.get_entity.return_value = NS(noforwards=True)
+        self.client.get_messages.side_effect = lambda peer, *, ids: posts if isinstance(ids, list) else posts[0]
+
+        async def write_media(link, path):
+            Path(path).write_bytes(b'12345678')
+
+        download = self.bot.tdl.download_media = AsyncMock(side_effect=write_media)
+        link = f'https://t.me/c/{SOURCE}/99'
+        job = staging.enqueue_download(UID, link, album=True)
+        await staging.download(job, {'link': link, 'album': True})
+        self.assertEqual([call.args[0] for call in download.await_args_list],
+                         [link, f'https://t.me/c/{SOURCE}/100'])
+        self.client.get_entity.assert_not_awaited()
+        self.assertEqual(staging.files()[2], 2)
+        self.assertEqual(staging.recent(UID)[0][2], 'done')
+
+    async def test_file_cleanup_keeps_unselected_downloads(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        staging = self.bot.file_staging = FileStaging(self.bot, root, root)
+        with closing(staging.connect()) as db, db:
+            for mid in (1, 2):
+                file_id = f'1-{mid}'
+                (root / f'relay-{file_id}').write_bytes(b'file')
+                db.execute('INSERT INTO files VALUES(?,1,?)',
+                           (file_id, json.dumps({'name': f'{mid}.jpg', 'mime': 'image/jpeg', 'size': 4})))
+        await self.click('📥 下载暂存')
+        await self.click('暂存文件列表')
+        await self.click('⬜ 1. 1.jpg')
+        await self.click('删除所选')
+        self.assertIn('将删除 1 项', self.page.raw_text)
+        await self.click('确认删除')
+        self.assertIsNone(staging.get('1-1'))
+        self.assertFalse((root / 'relay-1-1').exists())
+        self.assertIsNotNone(staging.get('1-2'))
+        self.assertTrue((root / 'relay-1-2').is_file())
+
+    async def test_staging_start_retires_legacy_publications_without_replaying(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        staging = self.bot.file_staging = FileStaging(self.bot, root, root)
+        with closing(staging.connect()) as db, db:
+            db.executemany("INSERT INTO jobs(owner,kind,state,payload) VALUES(?,?,?,'{}')",
+                           [(UID, kind, state) for kind, state in [
+                               ('publish', 'pending'), ('publish', 'working'), ('publish', 'sending'),
+                               ('publish', 'done'), ('download', 'working')]])
+        staging.start()
+        try:
+            jobs = [(kind, state) for _, kind, state, _ in reversed(staging.recent(UID))]
+            self.assertEqual(jobs, [('publish', 'failed'), ('publish', 'failed'), ('publish', 'review'),
+                                    ('publish', 'done'), ('download', 'pending')])
+        finally:
+            await staging.stop()
 
     async def test_webui_link_is_issued_only_from_admin_private_current_panel(self):
         panel = self.bot.admin_panel
