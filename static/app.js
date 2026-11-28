@@ -104,6 +104,10 @@ let mappings = null,
 let staged = null,
   stagedError = "",
   stagedRequest = 0;
+let stagedLayout = "grid";
+try {
+  if (localStorage.getItem("relay-staged-layout") === "list") stagedLayout = "list";
+} catch {}
 const pages = {
   home: "工作台",
   jobs: "任务队列",
@@ -269,6 +273,8 @@ function draw() {
     : page === "staged" ? "预览由 Bot 下载暂存的图片和视频。" : "";
   $("#page").innerHTML =
     `<div class="rowhead"><div><h1>${title}</h1>${description ? `<div class="sub">${description}</div>` : ""}</div>${page === "staged" ? "" : btn("new", "新建转发", "primary")}</div><div class="stack">${body}</div>`;
+  stopStagedThumbnails();
+  if (page === "staged" && !mediaDialog.open) loadStagedThumbnails();
 }
 function stagedSize(size) {
   if (size < 1024) return `${size} B`;
@@ -277,8 +283,19 @@ function stagedSize(size) {
 }
 const stagedUrl = (file) => "/api/staged-media/" + encodeURIComponent(file.id);
 const stagedImage = (file) => file.mime.startsWith("image/");
+function setStagedLayout(layout) {
+  if (layout !== "list" && layout !== "grid") return;
+  stagedLayout = layout;
+  const media = $("#page .staged-media");
+  if (media) media.dataset.layout = layout;
+  for (const button of document.querySelectorAll('#page [data-act="stagedLayout"]'))
+    button.setAttribute("aria-pressed", String(button.dataset.id === layout));
+  try { localStorage.setItem("relay-staged-layout", layout); } catch {}
+}
+
 function renderStaged() {
   let content = '<p class="hint" role="status">正在读取暂存文件…</p>';
+  let layoutControls = "";
   if (stagedError) content = `<p class="err" role="alert">${esc(stagedError)}</p>`;
   else if (staged && !staged.configured) content = '<p class="hint">文件暂存区尚未配置。请为容器挂载 /downloads。</p>';
   else if (staged && !staged.items.length) content = '<p class="hint">暂无可预览文件。请先在 Bot 点「📥 下载暂存」。</p>';
@@ -287,17 +304,105 @@ function renderStaged() {
       const type = stagedImage(file) ? "图片" : "视频";
       const preview = stagedImage(file)
         ? `<img src="${stagedUrl(file)}" loading="lazy" alt="">`
-        : '<span class="video-mark" aria-hidden="true">▶</span>';
+        : '<canvas class="video-thumbnail" aria-hidden="true" hidden></canvas><span class="video-mark" aria-hidden="true">▶</span>';
       return `<button type="button" class="media-card" data-act="previewMedia" data-id="${esc(file.id)}" aria-label="预览${type}：${esc(file.name)}"><span class="thumbnail">${preview}</span><span class="media-name">${esc(file.name)}<small>${type} · ${stagedSize(file.size)}</small></span></button>`;
     });
     const { page: current, pages: totalPages, total } = staged;
     const nav = totalPages > 1
       ? `<div class="actions pagination">${current > 1 ? btn("stagedPage", "上一页", "", current - 1) : ""}<span>第 ${current} / ${totalPages} 页</span>${current < totalPages ? btn("stagedPage", "下一页", "", current + 1) : ""}</div>`
       : "";
-    content = `<p class="hint">${total} 个文件</p><div class="media-grid">${tiles.join("")}</div>${nav}`;
+    const options = [["grid", "网格"], ["list", "列表"]];
+    layoutControls = `<div class="media-layout" role="group" aria-label="文件排列方式">${options.map(([layout, label]) =>
+      `<button type="button" class="btn" data-act="stagedLayout" data-id="${layout}" aria-pressed="${layout === stagedLayout}">${label}</button>`).join("")}</div>`;
+    content = `<p class="hint">${total} 个文件</p><div class="staged-media" data-layout="${stagedLayout}">${tiles.join("")}</div>${nav}`;
   }
-  return `<section class="card staging-panel">${head("已下载文件", btn("stagedPage", "刷新", "", staged?.page || 1))}${content}</section>`;
+  const controls = `<div class="actions">${layoutControls}${btn("stagedPage", "刷新", "", staged?.page || 1)}</div>`;
+  return `<section class="card staging-panel">${head("已下载文件", controls)}${content}</section>`;
 }
+
+let stopStagedThumbnails = () => {};
+function loadStagedThumbnails() {
+  const thumbnails = [...document.querySelectorAll("#page canvas.video-thumbnail[hidden]:not([data-thumbnail-tried])")];
+  if (!thumbnails.length) return;
+  const controller = new AbortController();
+  const pending = [];
+  let active = false;
+  async function queueThumbnails() {
+    if (active) return;
+    active = true;
+    while (pending.length && !controller.signal.aborted) {
+      const canvas = pending.shift();
+      const id = canvas.closest(".media-card").dataset.id;
+      await drawVideoThumbnail(canvas, stagedUrl({ id }), controller.signal);
+      if (!controller.signal.aborted) canvas.dataset.thumbnailTried = "";
+    }
+    active = false;
+  }
+  let observer;
+  if ("IntersectionObserver" in window) {
+    observer = new IntersectionObserver((entries) => {
+      for (const { target, isIntersecting } of entries) {
+        if (!isIntersecting) continue;
+        observer.unobserve(target);
+        pending.push(target.querySelector(".video-thumbnail"));
+      }
+      queueThumbnails();
+    });
+    thumbnails.forEach((canvas) => observer.observe(canvas.closest(".thumbnail")));
+  } else {
+    pending.push(...thumbnails);
+    queueThumbnails();
+  }
+  stopStagedThumbnails = () => {
+    observer?.disconnect();
+    controller.abort();
+    stopStagedThumbnails = () => {};
+  };
+}
+
+function drawVideoThumbnail(canvas, url, signal) {
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+
+    function finish() {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", finish);
+      video.onloadedmetadata = video.onloadeddata = video.onseeked = video.onerror = null;
+      video.removeAttribute("src");
+      video.load();
+      resolve();
+    }
+    function drawFrame() {
+      if (video.seeking || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+      try {
+        const scale = Math.min(1, 320 / video.videoWidth, 180 / video.videoHeight);
+        canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+        canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.hidden = false;
+      } catch {
+        // Keep the play icon if the browser cannot provide a frame.
+      }
+      finish();
+    }
+    const timeout = setTimeout(finish, 10000);
+    signal.addEventListener("abort", finish, { once: true });
+    video.onerror = finish;
+    video.onloadeddata = video.onseeked = drawFrame;
+    video.onloadedmetadata = () => {
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        try { video.currentTime = Math.min(1, video.duration / 3); } catch { drawFrame(); }
+      } else {
+        drawFrame();
+      }
+    };
+    video.src = url;
+  });
+}
+
 async function loadStaged(number) {
   const epoch = authEpoch;
   const request = ++stagedRequest;
@@ -310,6 +415,10 @@ async function loadStaged(number) {
     const result = await response.json();
     if (epoch !== authEpoch || request !== stagedRequest) return;
     staged = result;
+    if (page === "staged" && result.items.some((file) => !stagedImage(file))) {
+      // Warm only the player script. Media downloads wait until a card is visible or opened.
+      loadArtPlayer().catch(() => {});
+    }
   } catch {
     if (epoch !== authEpoch || request !== stagedRequest) return;
     stagedError = "文件暂存区暂不可用，请刷新重试。";
@@ -350,6 +459,7 @@ function mediaStatus(text) {
   mediaBody.append(message);
 }
 async function showStagedFile(file) {
+  stopStagedThumbnails();
   disposeMedia();
   const epoch = mediaEpoch;
   mediaFile = file;
@@ -386,7 +496,7 @@ async function showStagedFile(file) {
     mediaPlayer = new ArtPlayer({
       container: box, url: stagedUrl(file), lang: "zh-cn", theme: "#5284fd",
       setting: true, playbackRate: true, fullscreen: true,
-      moreVideoAttr: { playsInline: true, preload: "metadata" },
+      moreVideoAttr: { playsInline: true, preload: "auto" },
     });
     mediaPlayer.on("video:error", () => {
       if (epoch === mediaEpoch && !mediaBody.querySelector(".media-status"))
@@ -400,7 +510,9 @@ async function showStagedFile(file) {
 }
 $("#media-close").onclick = () => mediaDialog.close();
 mediaDialog.addEventListener("close", () => {
-  if (!mediaDialog.open) disposeMedia();
+  if (mediaDialog.open) return;
+  disposeMedia();
+  if (signedIn && page === "staged") loadStagedThumbnails();
 });
 $("#media-previous").onclick = () => showStagedFile(imageFiles[imageFiles.indexOf(mediaFile) - 1]);
 $("#media-next").onclick = () => showStagedFile(imageFiles[imageFiles.indexOf(mediaFile) + 1]);
@@ -547,6 +659,7 @@ function confirmPair(id, action) {
     `确认${label}`, () => savePair(action, revision, { source: id }));
 }
 const handlers = {
+  stagedLayout: setStagedLayout,
   stagedPage: loadStaged,
   previewMedia: (id) => {
     const files = staged?.items || [];
@@ -838,6 +951,7 @@ function loginScreen(message = "") {
   mappingError = "";
   staged = null;
   stagedError = "";
+  stopStagedThumbnails();
   setNavigation(false);
   if ($("#dlg").open) $("#dlg").close();
   if (mediaDialog.open) mediaDialog.close();

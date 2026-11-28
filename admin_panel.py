@@ -300,7 +300,7 @@ class AdminPanel:
                 return
             action = s.choices[event.data]
             if prompt_controls:
-                await self._exit_prompt(s, event)
+                await self._exit_prompt(s, event, action)
                 return
             if action == 'webui':
                 await self._send_webui_link(s, event)
@@ -338,20 +338,20 @@ class AdminPanel:
                 else:
                     await self._unavailable(s)
 
-    async def _exit_prompt(self, s, event):
+    async def _exit_prompt(self, s, event, action):
         choices = s.choices
         await event.answer()
         if not self.allowed(s.owner):
             return
         try:
-            await self._screen(s, *self.home_view())
+            await self._navigate(s, event, action)
         except Exception:
             if s.mid:
                 await self._unavailable(s)
                 return
             s.choices = choices
             logger.exception('无法从输入提示返回面板')
-            await self._error_notice(event.respond, '首页未能打开，请重试或发送 /start。')
+            await self._error_notice(event.respond, '面板未能打开，请重试或发送 /start。')
             return
         self._end_wait(s)
         s.stage, s.expires, s.start_link = '', 0, ''
@@ -534,10 +534,6 @@ class AdminPanel:
             return
         action, *args = parts
         if action == 'downloads':
-            rows = [[('粘贴帖子链接', 'files:link'), ('查看文件任务', 'files:jobs')],
-                    [('暂存文件列表', 'files:list:0')]]
-            await self._screen(s, '📥 下载暂存\n\n从 Telegram 帖子下载到 /downloads。', rows + [BACK])
-        elif action == 'link':
             await self._prompt(s, 'file-download')
         elif action in ('single', 'album'):
             if not s.file_link:
@@ -644,7 +640,10 @@ class AdminPanel:
             await self._prompt_with_cancel(s, text, f'🔄 手动同步\n\n只更新已映射的目标帖，不另发。输入 5 分钟内有效。\n{target}')
             return
         if stage == 'file-download':
-            await self._prompt_with_cancel(s, text, '📥 下载暂存\n\n回复 Telegram 帖子链接，输入 5 分钟内有效。')
+            await self._prompt_with_cancel(
+                s, text, '📥 下载暂存\n\n回复 Telegram 帖子链接，输入 5 分钟内有效。',
+                actions=[('查看文件任务', 'files:jobs'), ('暂存文件列表', 'files:list:0')],
+            )
             return
         if stage in ('export', 'end'):
             step = '起始链接' if stage == 'export' else '结束链接'
@@ -658,11 +657,12 @@ class AdminPanel:
         s.prompt = prompt
         self._arm_wait(s)
 
-    async def _prompt_with_cancel(self, s, text, description, *, reply_to=None):
+    async def _prompt_with_cancel(self, s, text, description, *, reply_to=None, actions=()):
         client = self.bot.client
+        rows = ([actions] if actions else []) + [[('⬅️ 取消并返回', 'home')]]
         controls = await client.send_message(
             s.owner, PROMPT + description,
-            buttons=self._keyboard(s, [[('⬅️ 取消并返回', 'home')]]), parse_mode=None, link_preview=False,
+            buttons=self._keyboard(s, rows), parse_mode=None, link_preview=False,
         )
         try:
             self.journal.stage_panel(self.bot_id, s.owner, controls.id, 'sync-controls')
