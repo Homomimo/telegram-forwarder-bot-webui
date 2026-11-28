@@ -1,31 +1,27 @@
-"""Persistent downloads and explicitly confirmed Bot publications."""
+"""Persistent Telegram downloads and the media catalog."""
 
 import asyncio
 from contextlib import closing
-from dataclasses import dataclass, field
 import json
 import logging
 import os
 from pathlib import Path
 import re
-import secrets
 import sqlite3
 import stat
 import time
 
-from telethon import errors, functions, types, utils
+from telethon import errors, types
 
 import accounts
-from channel_input import numeric_channel, parse_reference
-from forward_records import post_url
-from monitor_clone import expected_size, media_key, receipt_pairs
+from channel_input import parse_reference
+from monitor_clone import expected_size, media_key
 
 logger = logging.getLogger(__name__)
 DOWNLOADS = Path('/downloads')
 PAGE_SIZE = 7
 PREVIEW_PAGE_SIZE = 24
 MAX_ALBUM = 10
-DRAFT_TTL = 1800
 PREVIEW_TYPES = frozenset({
     'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif',
     'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
@@ -54,22 +50,16 @@ def parse_link(link):
 
 
 def media_info(post):
-    if getattr(post, 'noforwards', False):
-        raise ValueError('该消息已启用内容保护，无法暂存或重新发布。')
     key = media_key(post)
     if key.startswith('photo:'):
-        return {'name': f'照片-{post.id}.jpg', 'kind': 'photo', 'mime': 'image/jpeg'}
+        return {'name': f'照片-{post.id}.jpg', 'mime': 'image/jpeg'}
     if not key.startswith('document:'):
         raise ValueError('该消息没有可用的图片、视频或文件。')
     doc = post.media.document
-    video = next((attr for attr in doc.attributes if isinstance(attr, types.DocumentAttributeVideo)), None)
     name = next((attr.file_name for attr in doc.attributes if isinstance(attr, types.DocumentAttributeFilename)), '')
     name = name.replace('\\', '/').rsplit('/', 1)[-1]
     name = ''.join(c for c in name if c.isprintable()).strip()[:160] or f'文件-{post.id}'
-    info = {'name': name, 'kind': 'video' if video and not video.round_message else 'file', 'mime': doc.mime_type}
-    if info['kind'] == 'video':
-        info['video'] = [video.duration, video.w, video.h]
-    return info
+    return {'name': name, 'mime': doc.mime_type}
 
 
 def size_label(size):
@@ -80,37 +70,11 @@ def size_label(size):
     return f'{size / 1024**2:.1f} MB'
 
 
-@dataclass
-class Draft:
-    target: int | None
-    items: list = field(default_factory=list)
-    caption: str = ''
-    target_title: str = ''
-    updated: float = field(default_factory=time.monotonic)
-
-    def add(self, items):
-        known = {(item['source'], item['ref']) for item in self.items}
-        added = []
-        for item in items:
-            key = item['source'], item['ref']
-            if key not in known:
-                known.add(key)
-                added.append(item)
-        combined = [*self.items, *added]
-        if len(combined) > MAX_ALBUM:
-            raise ValueError('相册最多 10 项，请先移除部分文件。')
-        if len(combined) > 1 and any(item['kind'] == 'file' for item in combined):
-            raise ValueError('普通文件请单独发布。相册支持图片和视频。')
-        self.items = combined
-        return len(added)
-
-
 class FileStaging:
     def __init__(self, bot, data, root):
         self.bot = bot
         self.root = root
         self.db_path = data / 'file_staging.sqlite3'
-        self.drafts: dict[int, Draft] = {}
         self.wake = asyncio.Event()
         self.worker = None
         # Keep the database on /data and the media under the independently mounted directory.
@@ -127,8 +91,12 @@ class FileStaging:
 
     def start(self):
         with closing(self.connect()) as db, db:
-            db.execute("UPDATE jobs SET state='review', result='容器在发送期间重启，请先核对目标频道。' WHERE state='sending'")
-            db.execute("UPDATE jobs SET state='pending' WHERE state='working'")
+            # Keep old publication records for verification while preventing any queued send from resuming.
+            db.execute("UPDATE jobs SET state='review', result='旧发布任务曾开始发送，请核对目标频道。' "
+                       "WHERE kind='publish' AND state='sending'")
+            db.execute("UPDATE jobs SET state='failed', result='上传发布功能已移除，任务已取消。' "
+                       "WHERE kind='publish' AND state IN ('pending','working')")
+            db.execute("UPDATE jobs SET state='pending' WHERE kind='download' AND state='working'")
         self.worker = asyncio.create_task(self.run())
 
     async def stop(self):
@@ -137,21 +105,10 @@ class FileStaging:
             await asyncio.gather(self.worker, return_exceptions=True)
             self.worker = None
 
-    def draft(self, owner, *, create=False):
-        now = time.monotonic()
-        for user in tuple(self.drafts):
-            if now - self.drafts[user].updated >= DRAFT_TTL:
-                del self.drafts[user]
-        if create and owner not in self.drafts:
-            self.drafts[owner] = Draft(self.bot.target_chat_id)
-        if draft := self.drafts.get(owner):
-            draft.updated = now
-        return draft
-
-    def enqueue(self, owner, kind, payload):
+    def enqueue_download(self, owner, link, *, album):
         with closing(self.connect()) as db, db:
-            job = db.execute('INSERT INTO jobs(owner,kind,state,payload) VALUES(?,?,?,?)',
-                             (owner, kind, 'pending', json.dumps(payload))).lastrowid
+            job = db.execute("INSERT INTO jobs(owner,kind,state,payload) VALUES(?,'download','pending',?)",
+                             (owner, json.dumps({'link': link, 'album': album}))).lastrowid
         self.wake.set()
         return job
 
@@ -159,19 +116,6 @@ class FileStaging:
         with closing(self.connect()) as db:
             rows = db.execute('SELECT id,kind,state,result FROM jobs WHERE owner=? ORDER BY id DESC LIMIT 5', (owner,))
             return list(rows)
-
-    def downloaded(self, owner, job=None):
-        with closing(self.connect()) as db:
-            if job is None:
-                row = db.execute("SELECT id FROM jobs WHERE owner=? AND kind='download' AND state='done' "
-                                 'ORDER BY id DESC LIMIT 1', (owner,)).fetchone()
-                if row is None:
-                    return []
-                job = row[0]
-            rows = db.execute('SELECT files.id,files.payload FROM files JOIN jobs ON jobs.id=files.job '
-                              "WHERE jobs.id=? AND jobs.owner=? AND jobs.kind='download' AND jobs.state='done' "
-                              "ORDER BY CAST(substr(files.id,instr(files.id,'-')+1) AS INTEGER)", (job, owner))
-            return self.decode_files(rows)
 
     @staticmethod
     def decode_files(rows):
@@ -210,23 +154,14 @@ class FileStaging:
             raise
 
     def cleanup_candidates(self, ids=None):
-        now = time.monotonic()
-        keep = {item['ref'] for draft in self.drafts.values() if now - draft.updated < DRAFT_TTL
-                for item in draft.items if item['source'] == 'staging'}
         with closing(self.connect()) as db:
-            jobs = db.execute("SELECT payload FROM jobs WHERE kind='publish' AND state IN ('pending','working','sending')")
-            for (payload,) in jobs:
-                keep.update(item['ref'] for item in json.loads(payload)['items'] if item['source'] == 'staging')
             rows = db.execute('SELECT id,payload FROM files ORDER BY job DESC,id')
-            candidates = [item for item in self.decode_files(rows) if ids is None or item['id'] in ids]
-            eligible = [item for item in candidates if item['id'] not in keep]
-            return eligible, len(candidates) - len(eligible)
+            return [item for item in self.decode_files(rows) if ids is None or item['id'] in ids]
 
     def clean(self, ids):
         removed, failed = [], 0
         with closing(self.connect()) as db, db:
-            eligible, _ = self.cleanup_candidates(ids)
-            for item in eligible:
+            for item in self.cleanup_candidates(ids):
                 try:
                     (self.root / f'relay-{item["id"]}').unlink(missing_ok=True)
                 except OSError:
@@ -262,9 +197,6 @@ class FileStaging:
                 if FILE_ID.fullmatch(file_id):
                     orphan.unlink(missing_ok=True)
         client, peer, post = await self.source(payload['link'])
-        channel = await client.get_entity(peer)
-        if getattr(channel, 'noforwards', False):
-            raise ValueError('源频道已启用内容保护，无法暂存。')
         posts = [post]
         if payload['album'] and post.grouped_id:
             ids = list(range(max(1, post.id - 19), min(2**31, post.id + 20)))
@@ -308,76 +240,6 @@ class FileStaging:
             raise
         return f'下载完成，已暂存 {len(items)} 项。'
 
-    async def upload_staged(self, target, item):
-        with self.open_media(item) as stream:
-            uploaded_file = await self.bot.client.upload_file(stream, file_size=item['size'], file_name=item['name'])
-        if item['kind'] == 'photo':
-            uploaded = types.InputMediaUploadedPhoto(uploaded_file)
-        else:
-            attrs = [types.DocumentAttributeFilename(item['name'])]
-            if video := item.get('video'):
-                attrs.append(types.DocumentAttributeVideo(video[0], video[1], video[2], supports_streaming=True))
-            uploaded = types.InputMediaUploadedDocument(uploaded_file, item['mime'], attrs)
-        prepared = await self.bot.client(functions.messages.UploadMediaRequest(target, uploaded))
-        return utils.get_input_media(prepared)
-
-    async def publish(self, job, owner, payload):
-        client = self.bot.client
-        channel = numeric_channel(str(payload['target']))
-        if channel is None:
-            raise ValueError('目标频道无效，请重新选择。')
-        target = await self.bot.get_monitor_channel_peer(client, channel)
-        prepared = []
-        for item in payload['items']:
-            if item['source'] == 'staging':
-                stored = self.get(item['ref'])
-                if not stored:
-                    raise ValueError('暂存文件已不存在，请重新选择。')
-                media = await self.upload_staged(target, stored)
-            else:
-                post = await client.get_messages(owner, ids=item['ref'])
-                if not post or post.sender_id != owner:
-                    raise ValueError('Bot 私聊中的原文件已不可用，请重新发送。')
-                media_info(post)
-                media = utils.get_input_media(post.media)
-            if not isinstance(media, (types.InputMediaPhoto, types.InputMediaDocument)):
-                raise ValueError('无法生成可发布的媒体引用。')
-            prepared.append(media)
-        reserved = dict(enumerate(payload['random_ids']))
-        caption = payload['caption']
-        if len(prepared) == 1:
-            request = functions.messages.SendMediaRequest(target, prepared[0], caption, random_id=reserved[0])
-        else:
-            members = [types.InputSingleMedia(media, message=caption if index == 0 else '', random_id=reserved[index])
-                       for index, media in enumerate(prepared)]
-            request = functions.messages.SendMultiMediaRequest(target, members)
-        if not self.bot.admin_panel.allowed(owner):
-            raise ValueError('任务发起人已失去管理员权限。')
-        with closing(self.connect()) as db, db:
-            self.finish(db, job, 'sending', '')
-        try:
-            response = await client(request)
-        except (errors.ChatWriteForbiddenError, errors.ChatAdminRequiredError, errors.ChannelPrivateError,
-                errors.FileReferenceExpiredError) as exc:
-            message = ('媒体引用已失效，请将原文件重新发送给 Bot。' if isinstance(exc, errors.FileReferenceExpiredError)
-                       else 'Bot 无法向目标频道发帖，请检查频道权限。')
-            with closing(self.connect()) as db, db:
-                self.finish(db, job, 'failed', message)
-            raise ValueError(message) from exc
-        receipt = receipt_pairs(response, reserved)
-        if len(receipt) != len(prepared):
-            raise ValueError('Telegram 未返回完整发布回执。')
-        links = [post_url(channel, receipt[index], album=len(prepared) > 1) for index in reserved]
-        result = f'已发布到 {self.bot.channel_label(channel)}\n' + '\n'.join(links)
-        with closing(self.connect()) as db, db:
-            self.finish(db, job, 'done', result)
-        return result
-
-    @staticmethod
-    def publication(draft):
-        return {'target': draft.target, 'items': draft.items, 'caption': draft.caption,
-                'random_ids': [secrets.randbits(63) or 1 for _ in draft.items]}
-
     @staticmethod
     def finish(db, job, state, result):
         db.execute('UPDATE jobs SET state=?,result=? WHERE id=?', (state, result, job))
@@ -386,12 +248,12 @@ class FileStaging:
         while True:
             self.wake.clear()
             with closing(self.connect()) as db, db:
-                row = db.execute("SELECT id,owner,kind,payload,attempts FROM jobs WHERE state='pending' "
+                row = db.execute("SELECT id,owner,payload,attempts FROM jobs WHERE kind='download' AND state='pending' "
                                  'AND ready<=? ORDER BY id LIMIT 1', (time.time(),)).fetchone()
                 if row:
                     self.finish(db, row[0], 'working', '')
                 else:
-                    next_ready = db.execute("SELECT min(ready) FROM jobs WHERE state='pending'").fetchone()[0]
+                    next_ready = db.execute("SELECT min(ready) FROM jobs WHERE kind='download' AND state='pending'").fetchone()[0]
             if row is None:
                 if next_ready is None:
                     await self.wake.wait()
@@ -401,12 +263,12 @@ class FileStaging:
                     except TimeoutError:
                         pass
                 continue
-            job, owner, kind, raw, attempts = row
+            job, owner, raw, attempts = row
             payload = json.loads(raw)
             try:
                 if not self.bot.admin_panel.allowed(owner):
                     raise ValueError('任务发起人已失去管理员权限。')
-                result = await (self.download(job, payload) if kind == 'download' else self.publish(job, owner, payload))
+                result = await self.download(job, payload)
                 completed = True
             except errors.FloodWaitError as exc:
                 completed = False
@@ -421,16 +283,14 @@ class FileStaging:
                 completed = False
                 logger.warning('文件任务 %s 未完成（%s）', job, type(exc).__name__)
                 with closing(self.connect()) as db, db:
-                    sending = db.execute('SELECT state FROM jobs WHERE id=?', (job,)).fetchone()[0] == 'sending'
-                    result = ('发布结果待核对，请检查目标频道再决定是否重新发布。' if sending else
-                              str(exc)[:360] if isinstance(exc, ValueError) else '文件任务失败，请核对账号权限和暂存空间。')
-                    self.finish(db, job, 'review' if sending else 'failed', result)
+                    result = str(exc)[:360] if isinstance(exc, ValueError) else '下载失败，请核对账号权限和暂存空间。'
+                    self.finish(db, job, 'failed', result)
             if self.bot.admin_panel.allowed(owner):
                 try:
-                    if kind == 'download' and completed:
+                    if completed:
                         if await self.bot.admin_panel.file_download_ready(owner, job, result):
                             continue
-                        result += ' 打开「📥 下载暂存」可选用。'
+                        result += ' 打开「📥 下载暂存」查看文件。'
                     await asyncio.wait_for(self.bot.client.send_message(
                         owner, f'文件任务 #{job}\n{result}', parse_mode=None, link_preview=False), 10)
                 except Exception:

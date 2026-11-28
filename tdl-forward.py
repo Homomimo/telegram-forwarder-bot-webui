@@ -1089,9 +1089,8 @@ https://t.me/channel_name/42
 /start — 返回管理面板
 /help — 查看使用向导
 
-📁 暂存与发布
+📁 文件暂存
 「📥 下载暂存」输入原帖链接，可下载整组相册或单项。
-「📤 上传发布」可在私聊发送文件或从暂存区选用，编辑文案后确认发布。图片和视频最多 10 项一组。
 在 Bot 的暂存文件列表清理文件。WebUI 的「文件暂存区」可预览已下载的图片和视频。
 
 💡 频道设置支持裸 ID、标记 ID、@用户名和 t.me 链接。频道备注仅供显示。
@@ -2426,9 +2425,6 @@ class TelegramBot:
 
         @client.on(events.Album)
         async def monitor_album(event):
-            if (client is self.client and self.file_staging and event.chat_id == event.sender_id and not event.out
-                    and await self.admin_panel.accept_file_media(event.sender_id, event.chat_id, event.messages, album=True)):
-                return
             if selected():
                 await self.enqueue_monitor_post(event, event.messages)
 
@@ -3706,9 +3702,6 @@ class TelegramBot:
                 command = match[1].lower() if match else None
                 # Telegram may leave ForceReply selected when an administrator uses /start to recover.
                 private_start = command == '/start' and event.chat_id == event.sender_id and event.sender_id in ADMIN_IDS
-                if (self.file_staging and not private_start and event.chat_id == event.sender_id
-                        and await self.admin_panel.accept_file_media(event.sender_id, event.chat_id, [event.message])):
-                    return
                 if not private_start and await self.admin_panel.reply(event):
                     return  # Other prompt replies must never fall through to commands or forwarding.
                 if command:
