@@ -136,7 +136,17 @@ dialog::backdrop { background: #14213b80; }
 .gate-form #loginerr { color: var(--danger); }
 .gate-form #loginerr:empty { display: none; }
 .staging-panel .hint { margin: 0 0 10px; }
-.media-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(154px, 100%), 1fr)); gap: 12px; }
+.media-layout { display: flex; gap: 3px; padding: 2px; border: 1px solid var(--line); border-radius: 9px; }
+.media-layout .btn { border-color: transparent; padding-inline: 9px; }
+.media-layout .btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.staged-media { display: grid; gap: 12px; }
+.staged-media[data-layout="grid"] { grid-template-columns: repeat(auto-fill, minmax(min(154px, 100%), 1fr)); }
+.staged-media[data-layout="list"] { gap: 7px; }
+.staged-media[data-layout="list"] .media-card {
+  display: grid;
+  grid-template-columns: minmax(0, 102px) minmax(0, 1fr);
+  align-items: center;
+}
 .media-card {
   text-align: left;
   padding: 0;
@@ -148,9 +158,11 @@ dialog::backdrop { background: #14213b80; }
   font: inherit;
 }
 .media-card:hover { border-color: var(--accent); }
-.thumbnail { display: grid; place-items: center; overflow: hidden; aspect-ratio: 16 / 10; background: var(--accent-soft); }
-.thumbnail img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.video-mark { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; background: #2458db; color: white; }
+.thumbnail { position: relative; display: grid; place-items: center; overflow: hidden; aspect-ratio: 16 / 10; background: var(--accent-soft); }
+.thumbnail img, .thumbnail canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; }
+.video-mark { position: relative; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: #2458db; color: white; }
+.video-thumbnail:not([hidden]) + .video-mark { background: #132340d9; }
+.staged-media[data-layout="list"] .video-mark { width: 29px; height: 29px; font-size: 12px; }
 .media-name { display: grid; gap: 2px; padding: 9px 10px; font-weight: 620; overflow-wrap: anywhere; }
 .media-name small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .pagination { justify-content: center; margin-top: 12px; }
@@ -180,7 +192,8 @@ dialog::backdrop { background: #14213b80; }
 @media (max-width: 490px) {
   .gate-sheet { grid-template-columns: 1fr; }
   .gate-art, .gate-foot { display: none; }
-  .media-grid { grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr)); gap: 8px; }
+  .staged-media[data-layout="grid"] { grid-template-columns: repeat(auto-fill, minmax(min(120px, 100%), 1fr)); gap: 8px; }
+  .staged-media[data-layout="list"] .media-card { grid-template-columns: 76px minmax(0, 1fr); }
   .metric strong { font-size: 17px; }
   .modalhead, .modalfoot { padding-inline: 12px; }
 }

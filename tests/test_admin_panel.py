@@ -419,8 +419,11 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         staging = self.bot.file_staging = FileStaging(self.bot, root, root)
         await self.click('📥 下载暂存')
-        await self.click('粘贴帖子链接')
+        self.assertIsInstance(self.session.prompt.buttons, types.ReplyKeyboardForceReply)
+        self.assertIn('请回复要下载的 Telegram 帖子链接', self.session.prompt.raw_text)
         self.assertTrue(self.session.sync_controls_mid)
+        self.assertTrue(self.button('⬅️ 取消并返回'))
+        self.assertTrue(self.button('查看文件任务'))
         await self.reply(f'https://t.me/c/{SOURCE}/99')
         await self.click('下载整组')
         job = staging.recent(UID)[0][0]
