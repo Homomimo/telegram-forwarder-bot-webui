@@ -3,14 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#eae7f8" />
+    <meta name="theme-color" content="#f1f5fa" />
     <title>Telegram Forwarder · Bot + WebUI</title>
     <link rel="stylesheet" href="ui.css" />
     <link rel="stylesheet" href="glass.css" />
     <script src="app.js" defer></script>
   </head>
   <body>
-    <div class="wash" aria-hidden="true"></div>
     <section id="gate" hidden>
       <div class="gate-sheet">
         <div class="gate-story">
@@ -23,10 +22,6 @@
                 /></svg
             ></span>
             <div>Telegram频道转发<small>Telegram Forwarder Web</small></div>
-          </div>
-          <div class="story-copy">
-            <h1>频道消息，<br /><em>有序抵达。</em></h1>
-            <p>从监听到转发，每一条消息都有迹可循。</p>
           </div>
           <img
             src="prism.svg"
@@ -65,13 +60,14 @@
       </aside>
       <div id="shade"></div>
       <div class="shell">
-        <header>
-          <button id="menu" class="iconbtn mobile" aria-label="打开导航" aria-controls="side" aria-expanded="false">
-            ☰
-          </button>
+        <header class="topbar">
+          <div class="top-left">
+            <button id="menu" class="iconbtn mobile" aria-label="打开导航" aria-controls="side" aria-expanded="false">☰</button>
+            <span id="breadcrumb" class="muted"></span>
+          </div>
           <div class="profile">
-            <span class="userbadge" aria-label="管理员">A</span
-            ><button id="out" class="link" type="button">退出登录</button>
+            <button id="theme" class="btn" type="button" aria-pressed="false">深色模式</button>
+            <button id="out" class="link" type="button">退出登录</button>
           </div>
         </header>
         <main>
@@ -99,6 +95,20 @@
           ><button id="submit" class="btn primary">确认</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="media-dialog" aria-labelledby="media-title">
+      <div class="modalhead">
+        <div><h2 id="media-title"></h2><p id="media-detail" class="muted"></p></div>
+        <button id="media-close" type="button" class="btn" autofocus>关闭预览</button>
+      </div>
+      <div id="media-body"></div>
+      <div id="media-controls" class="modalfoot" hidden>
+        <div class="actions">
+          <button type="button" class="btn" id="media-previous">上一张</button>
+          <button type="button" class="btn" id="media-next">下一张</button>
+        </div>
+        <button type="button" class="btn" id="media-zoom" aria-pressed="false">放大</button>
+      </div>
     </dialog>
     <div id="toast" role="status"></div>
   </body>

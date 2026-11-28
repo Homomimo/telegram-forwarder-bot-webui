@@ -1,7 +1,8 @@
 #!/bin/sh
 # Standalone updater for the README's docker run deployment on a Linux VPS.
 set -eu
-exec python3 -u - <<'PY'
+exec python3 -u - "$@" <<'PY'
+import argparse
 import fcntl
 import json
 import os
@@ -43,7 +44,7 @@ def environment(config):
     return dict(item.split('=', 1) for item in config.get('Env') or [])
 
 
-def create_candidate(old, base, overrides, image_id):
+def create_candidate(old, base, overrides, image_id, host):
     # Replay runtime overrides, not the previous image's CMD, PATH, version or labels.
     config = old['Config']
     payload = {key: value for key, value in config.items() if value != base.get(key)}
@@ -52,7 +53,7 @@ def create_candidate(old, base, overrides, image_id):
     payload['Env'] = [f'{k}={v}' for k, v in overrides.items()]
     labels = base.get('Labels') or {}
     payload['Labels'] = {k: v for k, v in (config.get('Labels') or {}).items() if labels.get(k) != v}
-    payload.update(Image=image_id, HostConfig=old['HostConfig'])
+    payload.update(Image=image_id, HostConfig=host)
     # Use the local Engine create API so secrets never appear in argv or a temporary env file.
     version = docker('version', '--format', '{{.Server.APIVersion}}').decode().strip()
     url = f'http://localhost/v{version}/containers/create?name={STAGED}'
@@ -93,14 +94,30 @@ def data_directory(old):
         for entries in ports.values() for binding in entries or []
     ):
         raise RuntimeError('需要将容器 8765/tcp 映射到固定宿主机端口。')
-    if (len(mounts) != 1 or mounts[0]['Type'] != 'bind' or mounts[0]['Destination'] != '/data'
-            or not mounts[0]['RW'] or environment(old['Config']).get('RELAY_DATA') != '/data'):
-        raise RuntimeError('仅支持将单个宿主机数据目录以可写模式绑定到 /data。')
-    data = Path(mounts[0]['Source']).resolve(strict=True)
+    destinations = {mount['Destination']: mount for mount in mounts}
+    if (len(mounts) != len(destinations) or set(destinations) not in ({'/data'}, {'/data', '/downloads'})
+            or any(mount['Type'] != 'bind' or not mount['RW'] for mount in mounts)
+            or environment(old['Config']).get('RELAY_DATA') != '/data'):
+        raise RuntimeError('部署必须可写绑定 /data，可选另一个独立的 /downloads 绑定目录。')
+    data = Path(destinations['/data']['Source']).resolve(strict=True)
     backups = BACKUPS.resolve()
     if not data.is_dir() or data == backups or data in backups.parents:
         raise RuntimeError('数据目录不正确，或备份目录位于数据目录内。')
     return data
+
+
+def downloads_directory(path, data, *, create=False):
+    if not path.is_absolute() or any(c in str(path) for c in ':\r\n'):
+        raise RuntimeError('/downloads 的宿主机目录必须是绝对路径，不能包含冒号或换行。')
+    resolved = path.resolve()
+    if any(resolved == other or resolved in other.parents or other in resolved.parents
+           for other in (data, BACKUPS.resolve())):
+        raise RuntimeError('/downloads 必须独立于 /data 和备份目录。')
+    if create:
+        resolved.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not resolved.is_dir() or any(c in str(resolved) for c in ':\r\n'):
+        raise RuntimeError('/downloads 的宿主机目录无效。')
+    return resolved
 
 
 def check_queue(data):
@@ -112,6 +129,14 @@ def check_queue(data):
             raise RuntimeError('队列非空，未切换镜像。请稍后用 /queue 核对并重试。')
     finally:
         db.close()
+    staging = data / 'file_staging.sqlite3'
+    if staging.exists():
+        db = sqlite3.connect(staging.as_uri() + '?mode=ro', uri=True)
+        try:
+            if db.execute("SELECT 1 FROM jobs WHERE state IN ('pending','working','sending') LIMIT 1").fetchone():
+                raise RuntimeError('文件任务未完成，未切换镜像。请在 Bot 的下载暂存中查看文件任务。')
+        finally:
+            db.close()
 
 
 def backup(data):
@@ -165,7 +190,7 @@ def wait_ready(cid):
     raise RuntimeError('180 秒内未收到 Bot 就绪日志。')
 
 
-def update():
+def update(downloads=None):
     global stop_requested
     old = inspect('container', NAME)
     previous_id = old['Id']
@@ -179,7 +204,7 @@ def update():
     names = docker('container', 'ls', '-a', '--format', '{{.Names}}').decode().splitlines()
     if STAGED in names or PREVIOUS in names:
         raise RuntimeError('发现上次更新留下的 .next 或 .previous 容器，请先检查，不会覆盖。')
-    if old['Image'] == image['Id']:
+    if old['Image'] == image['Id'] and downloads is None:
         print('已是最新镜像，未停止容器。')
         return
     data = data_directory(old)
@@ -187,6 +212,15 @@ def update():
         raise RuntimeError('当前镜像未声明使用 /data 布局，取消更新。')
     if (image['Config'].get('Labels') or {}).get(DATA_LAYOUT_LABEL) != 'flat':
         raise RuntimeError('新镜像未声明使用 /data 布局，取消更新。')
+    existing = next((mount for mount in old['Mounts'] if mount['Destination'] == '/downloads'), None)
+    mounted = downloads_directory(Path(existing['Source']), data) if existing else None
+    requested = downloads_directory(downloads, data, create=not mounted) if downloads else None
+    if mounted and requested and requested != mounted:
+        raise RuntimeError('容器已挂载另一个 /downloads 目录，取消更新。')
+    added = requested if not mounted else None
+    if old['Image'] == image['Id'] and not added:
+        print('已是最新镜像，未停止容器。')
+        return
     legacy = data / 'live'
     if legacy.exists() or legacy.is_symlink():
         raise RuntimeError('发现旧数据目录 /data/live，请先迁移数据到 /data，取消更新。')
@@ -198,13 +232,22 @@ def update():
     if defaults.keys() - current.keys():
         raise RuntimeError('不支持显式移除镜像环境变量的部署。')
     overrides = {k: v for k, v in current.items() if defaults.get(k) != v}
-    cid = create_candidate(old, base, overrides, image['Id'])
+    host = old['HostConfig'].copy()
+    if added:
+        host['Binds'] = [*(host.get('Binds') or []), f'{added}:/downloads:rw']
+    cid = create_candidate(old, base, overrides, image['Id'], host)
     stopping_old = False
     try:
         candidate = inspect('container', cid)
-        if candidate['Mounts'] != old['Mounts']:
-            raise RuntimeError('候选容器的挂载（Mounts）与原容器不一致，取消更新。')
-        old_host = comparable_host_config(old)
+        prior_mounts = {mount['Destination']: mount for mount in old['Mounts']}
+        new_mounts = {mount['Destination']: mount for mount in candidate['Mounts']}
+        if added:
+            mount = new_mounts.pop('/downloads', {})
+            if mount.get('Type') != 'bind' or not mount.get('RW') or Path(mount.get('Source', '')).resolve() != added:
+                raise RuntimeError('候选容器未按指定路径挂载 /downloads，取消更新。')
+        if new_mounts != prior_mounts or len(candidate['Mounts']) != len(prior_mounts) + bool(added):
+            raise RuntimeError('候选容器的数据挂载与升级计划不一致，取消更新。')
+        old_host = comparable_host_config({'HostConfig': host})
         new_host = comparable_host_config(candidate)
         if old_host != new_host:
             fields = sorted(k for k in old_host.keys() | new_host.keys()
@@ -252,6 +295,9 @@ def interrupted(*_):
 
 
 try:
+    parser = argparse.ArgumentParser(description='更新 Telegram 转发 Bot 和 WebUI 容器。')
+    parser.add_argument('--downloads', type=Path, metavar='PATH', help='为旧部署添加独立的 /downloads 宿主机目录')
+    args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError('请在 Linux VPS 上以 root 运行。')
     os.umask(0o077)
@@ -259,7 +305,7 @@ try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, interrupted)
-        update()
+        update(args.downloads)
 except BlockingIOError:
     sys.exit('另一个更新正在进行，请勿重复运行。')
 except KeyboardInterrupt:

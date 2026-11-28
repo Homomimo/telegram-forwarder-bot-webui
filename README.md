@@ -13,6 +13,7 @@ docker run -d --init --restart unless-stopped \
   --log-opt max-size=10m --log-opt max-file=3 \
   -p 8765:8765 \
   -v /root/telegram-forwarder/data:/data \
+  -v /root/telegram-forwarder/downloads:/downloads \
   -e API_ID='你的API_ID' \
   -e API_HASH='你的API_HASH' \
   -e BOT_TOKEN='你的Bot Token' \
@@ -55,6 +56,12 @@ docker logs telegram-forwarder-bot 2>&1 | grep -E '\[启动/WebUI\]|HTTPS SHA256
 
 列表有记录时，可选择「清理全部映射…」并确认。原帖和目标帖会保留，已复制的帖子仍会去重。清理后的旧帖失去编辑同步和手动同步所需的对应关系，新帖会继续建立映射。
 
+## 下载暂存与上传发布
+
+- 在 Bot 管理员首页点「📥 下载暂存」，回复原帖链接，选择整组相册或单项。下载使用已登录的 TDL 账号读取媒体，Bot 或已连接的 Telethon 用户会话也需要能读取源帖以核对媒体和相册。
+- 点「📤 上传发布」，在 Bot 私聊发送媒体或从暂存区选用。可排序、编辑文案或为本次另选目标频道。单个文件可按单帖发，图片和视频最多 10 项一组，文案显示在相册第一项。目标频道需授予 Bot 发帖权限。
+- WebUI 的「文件暂存区」支持预览图片和浏览器可播放的视频。清理在 Bot 的暂存文件列表中执行，可勾选删除或清理全部未使用文件。正在下载、被草稿选中或正在发送的文件会保留。
+
 ## 在 VPS 上更新
 
 镜像发布后不会自动替换运行中的容器。先在 Bot 中用 `/queue` 确认没有正在转发或等待的任务，再以 **root** 在 VPS 上执行（需要 Python 3、curl 和 GNU tar，无需克隆仓库或重填 Token）：
@@ -63,7 +70,15 @@ docker logs telegram-forwarder-bot 2>&1 | grep -E '\[启动/WebUI\]|HTTPS SHA256
 curl -fsSL https://raw.githubusercontent.com/Homomimo/telegram-forwarder-bot-webui/main/update.sh -o /root/telegram-forwarder/update.sh && sh /root/telegram-forwarder/update.sh
 ```
 
-脚本拉取 `latest`；镜像没变就不停机。有更新时先停机备份 `/data` 到 `/root/telegram-forwarder/backups/`，再沿用原容器配置启动。已有的 `RELAY_VPS_IP` 会继续作为手动配置。健康检查使用容器实际启用的 WebUI 地址。看到「更新成功」后，在 Bot 私聊发送 `/start`，点击「🌐 打开 WebUI」并打开新发来的一次性链接，验证外部访问。
+旧容器只有 `/data` 时，可以照常更新。要同时启用文件暂存区，使用已下载的更新脚本显式添加一个独立目录：
+
+```bash
+sh /root/telegram-forwarder/update.sh --downloads /root/telegram-forwarder/downloads
+```
+
+后续更新会沿用原有挂载。更新前请在 Bot 的「📥 下载暂存 → 查看文件任务」确认文件任务已完成。`/downloads` 中的媒体可按需单独备份。`/data` 的停机备份包含文件目录索引。
+
+脚本拉取 `latest`。镜像与挂载都没变时无需停机。有更新时先停机备份 `/data` 到 `/root/telegram-forwarder/backups/`，再沿用原容器配置启动。已有的 `RELAY_VPS_IP` 会继续作为手动配置。健康检查使用容器实际启用的 WebUI 地址。看到「更新成功」后，在 Bot 私聊发送 `/start`，点击「🌐 打开 WebUI」并打开新发来的一次性链接，验证外部访问。
 
 若更新失败，脚本会尝试恢复旧容器。若 VPS 断电或回退失败，先用 `docker ps -a` 检查 `.previous`、`.next` 和正式容器，确认数据目录完整后再手动启动。备份含账号会话和 HTTPS 私钥，请妥善保管，按需清理。
 

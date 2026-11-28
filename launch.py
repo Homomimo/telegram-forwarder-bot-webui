@@ -13,6 +13,7 @@ import threading
 
 import accounts
 from console_http import Console, Handler
+from file_staging import FileStaging, mounted_downloads
 import vps_https
 
 
@@ -26,6 +27,9 @@ def prepare_data():
     if sys.platform == "linux" and os.getuid() == 0 and data == Path("/data"):
         data.chmod(0o700)
         os.chown(data, 10001, 10001)
+        if downloads := mounted_downloads():
+            downloads.chmod(0o700)
+            os.chown(downloads, 10001, 10001)
         os.setgroups([])
         os.setgid(10001)
         os.setuid(10001)
@@ -114,6 +118,10 @@ async def serve(data):
         raise SystemExit(f"[启动/WebUI] {exc}") from None
     bot = core.TelegramBot()
     bot.console_data = data
+    if downloads := mounted_downloads():
+        if not os.access(downloads, os.R_OK | os.W_OK | os.X_OK):
+            raise SystemExit("/downloads 必须是 Bot 可读写的独立挂载目录")
+        bot.file_staging = FileStaging(bot, data, downloads)
     cfg = data / "channels.json"
     if cfg.exists():
         saved = json.loads(cfg.read_text("utf-8"))

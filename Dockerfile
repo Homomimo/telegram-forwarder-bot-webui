@@ -11,7 +11,7 @@ ENV RELAY_VERSION=${APP_VERSION}
 LABEL org.opencontainers.image.title="Telegram Forwarder · Bot + WebUI" \
       org.opencontainers.image.version="${APP_VERSION}" \
       io.github.homomimo.telegram-forwarder.data-layout="flat"
-COPY VERSION channel_input.py accounts.py admin_panel.py clone_receipts.py console_http.py forward_records.py gen_telethon_session.py launch.py manual_forward.py monitor_clone.py queue_view.py relay_delivery.py task_journal.py tdl-forward.py vps_https.py web_sessions.py ./
+COPY VERSION channel_input.py accounts.py admin_panel.py clone_receipts.py console_http.py file_staging.py forward_records.py gen_telethon_session.py launch.py manual_forward.py monitor_clone.py queue_view.py relay_delivery.py task_journal.py tdl-forward.py vps_https.py web_sessions.py ./
 RUN if [ "$APP_VERSION" != dev ]; then printf '%s\n' "$APP_VERSION" > VERSION; fi
 COPY static/ ./static/
 EXPOSE 8765

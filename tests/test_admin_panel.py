@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from telethon import TelegramClient, events, types
 from bot_fixture import app, FakeClient, SOURCE, TARGET
 from web_sessions import WebSessions
+from file_staging import FileStaging
+from test_monitor_tdl_fallback import photo
 
 UID = 61
 
@@ -356,7 +358,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bot.strict_pairs)
         self.assertEqual(bot.channel_pairs[SOURCE][:2], (TARGET, True))
 
-    async def test_webui_url_only_appears_beside_source_mappings_in_configured_private_home(self):
+    async def test_webui_url_only_appears_beside_guide_in_configured_private_home(self):
         label = '🌐 打开 WebUI'
         panel = self.bot.admin_panel
         self.assertFalse(any(b.text == label for row in self.page.buttons for b in row))
@@ -368,16 +370,17 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         panel.webui_url = 'https://203.0.113.10:9443'
         await self.text('/start')
         markup = TelegramClient.build_reply_markup(self.page.buttons)
-        home_link, mappings_button = markup.rows[0].buttons
+        home_link, guide_button = markup.rows[0].buttons
         self.assertEqual(home_link.text, label)
         self.assertIsInstance(home_link.type, types.InlineButtonTypeCallback)
-        self.assertEqual(mappings_button.text, '🔗 源帖映射')
+        self.assertEqual(guide_button.text, '📖 使用向导')
         self.assertEqual([[b.text for b in row.buttons] for row in markup.rows], [
-            [label, '🔗 源帖映射'],
+            [label, '📖 使用向导'],
+            ['📥 下载暂存', '📤 上传发布'],
             ['🎯 目标频道', '📡 监听频道'],
             ['🔄 手动同步', '📦 批量转发'],
             ['📋 任务队列', '📝 转发记录'],
-            ['📖 使用向导', '⚙️ 系统管理'],
+            ['🔗 源帖映射', '⚙️ 系统管理'],
         ])
         self.assertTrue(self.page.raw_text.endswith(
             '🌐 首次使用：点击「🌐 打开 WebUI」获取一次性登录链接，打开后进入「工作台设置」，'
@@ -403,12 +406,52 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.session.choices.values()), {'ask:restart', 'home'})
         await self.click('⬅️ 返回面板')
         self.assertEqual(self.page.buttons[0][0].text, label)
-        self.assertEqual(self.page.buttons[0][1].text, '🔗 源帖映射')
+        self.assertEqual(self.page.buttons[0][1].text, '📖 使用向导')
         self.assertIn('扫码登录', self.page.raw_text)
 
         for uid, chat in [(UID, -90), (71, 71)]:
             event = await self.text('/start', uid=uid, chat=chat)
             self.assertNotIn('buttons', event.respond.await_args.kwargs)
+
+    async def test_download_uses_current_panel_for_completion(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        staging = self.bot.file_staging = FileStaging(self.bot, root, root)
+        await self.click('📥 下载暂存')
+        await self.click('粘贴帖子链接')
+        self.assertTrue(self.session.sync_controls_mid)
+        await self.reply(f'https://t.me/c/{SOURCE}/99')
+        await self.click('下载整组')
+        job = staging.recent(UID)[0][0]
+        current = self.page.id
+        self.assertTrue(await self.bot.admin_panel.file_download_ready(UID, job, '下载完成，已暂存 2 项。'))
+        self.assertEqual(self.page.id, current)
+        self.assertTrue(self.button('选用这些文件'))
+        self.assertFalse(await self.bot.admin_panel.file_download_ready(UID, job, '重复回执'))
+
+    async def test_upload_draft_consumes_media_and_confirmation_admits_once(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.bot.file_staging = FileStaging(self.bot, root, root)
+        await self.click('📤 上传发布')
+        await self.click('发送文件到 Bot')
+        post = photo(500)
+        post.text, post.forward, post.post = '', True, False
+        post.peer_id, post.reply_to_msg_id = types.PeerUser(UID), None
+        event = NS(message=post, chat_id=UID, sender_id=UID, out=False, is_channel=False, raw_text='')
+        await self.new(event)
+        await self.new(event)
+        self.bot.do_forward.assert_not_called()
+        self.assertIn('1/10', self.page.raw_text)
+        await self.click('返回草稿')
+        await self.click('编辑文案')
+        await self.reply('发布文案')
+        await self.click('预览并确认')
+        confirmation, mid = self.button('确认发布'), self.page.id
+        await self.hit(confirmation, mid=mid)
+        await self.hit(confirmation, mid=mid)
+        staging = self.bot.file_staging
+        self.assertEqual(len(staging.recent(UID)), 1)
+        self.assertEqual(staging.recent(UID)[0][1:3], ('publish', 'pending'))
+        self.assertIsNone(staging.draft(UID))
 
     async def test_webui_link_is_issued_only_from_admin_private_current_panel(self):
         panel = self.bot.admin_panel
@@ -434,7 +477,7 @@ class PrivatePanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_home_pages_refresh_back_and_context(self):
         self.assertEqual(self.page.raw_text, self.bot.admin_panel.home_view()[0])
-        self.assertEqual(len(self.page.buttons), 5)
+        self.assertEqual(len(self.page.buttons), 6)
         for label, expected in [('🎯 目标频道', str(TARGET)), ('📡 监听频道', str(SOURCE)),
                                 ('📋 任务队列', '队列为空'), ('📝 转发记录', '暂无转发'),
                                 ('🔗 源帖映射', '暂无已确认的源帖映射。'),
