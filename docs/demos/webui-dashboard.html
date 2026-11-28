@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>转发工作台 · 界面演示</title>
+<style>
+  :root {
+    color-scheme: light;
+    --canvas: #f1f5fa; --panel: #fff; --soft: #f6f8fc; --line: #e0e7f0; --ink: #182841;
+    --muted: #56677e; --blue: #2458db; --blue-soft: #edf2ff; --green: #116b4c;
+    --green-soft: #e8f7ef; --amber: #92540d; --amber-soft: #fff3dd; --radius: 14px;
+    font: 14px/1.5 Inter, "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  }
+  [data-theme="dark"] {
+    color-scheme: dark; --canvas: #101724; --panel: #192435; --soft: #1f2b3e; --line: #304057;
+    --ink: #e5edf9; --muted: #a7b7ce; --blue: #9bb7ff; --blue-soft: #233a65;
+    --green: #8cdbb5; --green-soft: #203d38; --amber: #ffd28d; --amber-soft: #493720;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--canvas); color: var(--ink); }
+  button, input, select { font: inherit; }
+  button { cursor: pointer; }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #709aff; outline-offset: 2px; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+  a { color: var(--blue); }
+  h1, h2, p { margin: 0; }
+  [hidden] { display: none !important; }
+  .layout { min-height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); }
+  .sidebar { position: sticky; top: 0; align-self: start; height: 100vh; padding: 24px 14px 15px; display: flex; flex-direction: column; gap: 27px; background: var(--panel); border-right: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 11px; padding-inline: 7px; }
+  .mark { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; border-radius: 11px; background: #2859dc; color: #fff; font-size: 22px; font-weight: 750; }
+  .brand strong { display: block; font-size: 14px; }
+  .brand small, .muted { color: var(--muted); }
+  nav { display: grid; gap: 6px; }
+  .nav-link { text-decoration: none; display: flex; align-items: center; gap: 12px; color: var(--muted); min-height: 43px; border-radius: 9px; padding: 0 12px; font-weight: 600; }
+  .nav-link:hover { background: var(--soft); color: var(--ink); }
+  .nav-link[aria-current="page"] { background: var(--blue-soft); color: var(--blue); }
+  .nav-icon { display: inline-grid; place-items: center; width: 18px; font-weight: 700; font-size: 16px; }
+  .sidefoot { margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 13px 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #28aa74; flex: 0 0 8px; }
+  .topbar { min-height: 65px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 32px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .top-left, .actions, .panel-head, .page-head { display: flex; align-items: center; gap: 10px; }
+  .top-left { min-width: 0; }
+  .topbar .actions { justify-content: flex-end; }
+  .crumb { color: var(--muted); font-size: 13px; }
+  .button { border: 1px solid var(--line); border-radius: 8px; min-height: 35px; padding: 6px 12px; color: var(--ink); font-weight: 650; background: var(--panel); text-decoration: none; white-space: nowrap; display: inline-flex; justify-content: center; align-items: center; }
+  .button:hover { background: var(--soft); }
+  .primary { background: #2458db; border-color: #2458db; color: #fff; }
+  .primary:hover { background: #1948c4; }
+  .quiet { border-color: transparent; background: transparent; color: var(--blue); padding-inline: 7px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 6px; padding: 3px 8px; color: var(--muted); background: var(--soft); font-weight: 640; font-size: 12px; white-space: nowrap; }
+  .success { background: var(--green-soft); color: var(--green); }
+  .pending { background: var(--amber-soft); color: var(--amber); }
+  .accent { background: var(--blue-soft); color: var(--blue); }
+  .menu-toggle, .scrim { display: none; }
+  main { width: min(100%, 1440px); margin: 0 auto; padding: 30px 32px 36px; }
+  .page-head { justify-content: space-between; margin-bottom: 19px; }
+  h1 { font-size: 29px; line-height: 1.2; letter-spacing: -.025em; }
+  .page-head p { margin-top: 7px; color: var(--muted); font-size: 13px; }
+  .demo-note { color: var(--muted); font-size: 12px; }
+  .metrics { display: grid; grid-template-columns: 1.3fr repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+  .metric, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  .metric { min-width: 0; padding: 15px 16px 14px; text-decoration: none; color: var(--ink); }
+  .metric:hover { border-color: var(--blue); }
+  .metric-label { display: flex; align-items: center; justify-content: space-between; gap: 7px; color: var(--muted); font-weight: 650; font-size: 12px; }
+  .metric-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--blue-soft); color: var(--blue); font-size: 17px; }
+  .metric-value { display: block; font-weight: 760; font-size: 26px; line-height: 1.15; margin-top: 10px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .metric-value.name { font-size: 20px; line-height: 30px; }
+  .metric-note { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+  .columns { display: grid; grid-template-columns: minmax(0, 2.1fr) minmax(230px, .9fr); gap: 16px; align-items: start; }
+  .stack { display: grid; gap: 15px; min-width: 0; }
+  .panel { min-width: 0; overflow: hidden; }
+  .panel-head { justify-content: space-between; padding: 13px 16px; border-bottom: 1px solid var(--line); min-height: 59px; }
+  h2 { font-size: 15px; font-weight: 740; }
+  .table-wrap { overflow: auto; }
+  table { border-collapse: collapse; width: 100%; text-align: left; }
+  th { background: var(--soft); color: var(--muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
+  th, td { padding: 12px 15px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  td { font-size: 13px; }
+  td small { display: block; color: var(--muted); margin-top: 2px; font-size: 11px; font-variant-numeric: tabular-nums; }
+  td .button { min-height: 30px; padding: 3px 8px; }
+  .time { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pairs td:nth-child(1), .pairs td:nth-child(2) { min-width: 140px; }
+  .data-list { margin: 0; padding: 3px 15px; }
+  .data-list > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 1px; border-bottom: 1px solid var(--line); }
+  .data-list > div:last-child { border-bottom: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-weight: 650; text-align: right; }
+  .channel-id { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .empty { color: var(--muted); padding: 25px 16px; }
+  dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--ink); width: min(460px, 94vw); max-height: 85vh; padding: 0; }
+  dialog::backdrop { background: #14213b68; }
+  form { padding: 0 17px 15px; }
+  form .panel-head { padding-inline: 0; margin-bottom: 14px; }
+  label { display: grid; gap: 5px; margin-block: 12px; font-weight: 650; }
+  input, select { width: 100%; border: 1px solid var(--line); border-radius: 8px; min-height: 39px; padding: 7px 10px; color: var(--ink); background: var(--soft); }
+  .form-actions { justify-content: flex-end; margin-top: 15px; }
+  .error { min-height: 1em; color: var(--amber); font-size: 12px; }
+  .toast { position: fixed; z-index: 4; bottom: 18px; right: 18px; max-width: calc(100vw - 36px); background: var(--panel); color: var(--ink); padding: 11px 14px; border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 12px 30px #18284128; }
+  @media (max-width: 1050px) {
+    .layout { grid-template-columns: 184px minmax(0, 1fr); }
+    main, .topbar { padding-inline: 23px; }
+    .columns { grid-template-columns: 1fr; }
+    .columns > .stack:last-child { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 720px) {
+    .layout { display: block; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; width: 226px; z-index: 3; transform: translateX(-100%); visibility: hidden; }
+    .sidebar.open { transform: none; visibility: visible; }
+    .scrim.open { display: block; position: fixed; inset: 0; z-index: 2; background: #14213b60; border: 0; }
+    .menu-toggle { display: inline-flex; }
+    main { padding: 19px 14px 30px; }
+    .topbar { padding-inline: 13px; min-height: 58px; }
+    .topbar .actions { gap: 5px; }
+    .crumb, .topbar .pill { display: none; }
+    .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .metric { padding: 10px; }
+    .metric-icon { width: 24px; height: 24px; font-size: 13px; }
+    .metric-value.name { font-size: 17px; }
+    .columns > .stack:last-child { grid-template-columns: 1fr; }
+    th, td { padding: 10px 11px; }
+    .records { min-width: 575px; }
+    .pairs { min-width: 500px; }
+    .queue { min-width: 520px; }
+    .map-table { min-width: 450px; }
+    h1 { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="侧栏">
+    <div class="brand"><span class="mark" aria-hidden="true">↗</span><div><strong>频道转发</strong><small>Telegram Forwarder</small></div></div>
+    <nav id="nav" aria-label="主导航"></nav>
+    <div class="sidefoot"><span class="dot" aria-hidden="true"></span>离线演示 · 模拟数据</div>
+  </aside>
+  <button class="scrim" id="scrim" aria-label="关闭菜单"></button>
+  <div>
+    <header class="topbar">
+      <div class="top-left"><button type="button" class="button menu-toggle" id="menu" aria-label="打开菜单" aria-controls="sidebar" aria-expanded="false">☰</button><span class="crumb" id="crumb"></span></div>
+      <div class="actions">
+        <span class="pill success"><span class="dot" aria-hidden="true"></span>Bot 在线</span>
+        <button type="button" class="button" id="theme" aria-pressed="false">深色模式</button>
+        <button type="button" class="button primary" data-action="new">＋ 新建转发</button>
+      </div>
+    </header>
+    <main id="page"></main>
+  </div>
+</div>
+<dialog id="dialog" aria-labelledby="dialog-title"><form id="form">
+  <div class="panel-head"><h2 id="dialog-title"></h2><button class="button quiet" type="button" data-action="close" aria-label="关闭">×</button></div>
+  <div id="dialog-body"></div><p class="error" id="error" role="alert"></p>
+  <div class="actions form-actions"><button class="button" type="button" data-action="close">关闭</button><button class="button primary" id="submit" type="submit" hidden>确认</button></div>
+</form></dialog>
+<div id="toast" class="toast" role="status" hidden></div>
+<script>
+"use strict";
+const $ = selector => document.querySelector(selector);
+const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[char]));
+const sections = {
+  home: ["工作台", "▦"], pairs: ["频道配对", "⇄"], jobs: ["任务队列", "≡"],
+  history: ["转发记录", "◷"], mappings: ["源帖映射", "↔"], settings: ["工作台设置", "⚙"],
+};
+const channels = {
+  1012345678: "科技快讯", 1012345679: "行业观察", 1012345680: "产品更新",
+  1098765432: "日常归档", 1098765433: "科技速报归档", 1098765434: "行业资料库", 1098765435: "产品归档",
+};
+const pairs = [
+  {source:1012345678, target:1098765433, enabled:true},
+  {source:1012345679, target:1098765434, enabled:true},
+  {source:1012345680, target:1098765435, enabled:false},
+];
+const historyRows = [
+  {id:48, source:1012345678, target:1098765433, kind:"自动复制", status:"已确认", time:"14:32", post:618},
+  {id:47, source:1012345679, target:1098765434, kind:"编辑同步", status:"已确认", time:"14:18", post:294},
+  {id:46, source:1012345680, target:1098765432, kind:"批量转发", status:"待核对", time:"13:57"},
+  {id:45, source:1012345678, target:1098765432, kind:"手动转发", status:"已确认", time:"13:41", post:885},
+];
+const jobs = [
+  {id:49, link:"https://t.me/c/1012345678/121", target:1098765433, kind:"自动复制", status:"执行中"},
+  {id:50, link:"https://t.me/c/1012345680/81", target:1098765432, kind:"批量转发", status:"等待执行"},
+];
+let current = "home", onSubmit, toastTimer;
+const defaultTarget = 1098765432;
+const label = id => channels[id] ? channels[id] + "（" + id + "）" : String(id);
+const cell = id => channels[id] ? "<strong>" + escape(channels[id]) + "</strong><small>" + id + "</small>" : escape(id);
+const pill = (value, type = "") => '<span class="pill ' + type + '">' + escape(value) + '</span>';
+const button = (text, action, id = "") => '<button type="button" class="button quiet" data-action="' + action + '" data-id="' + id + '">' + escape(text) + '</button>';
+const panel = (title, body, action = "") => '<section class="panel"><div class="panel-head"><h2>' + escape(title) + "</h2>" + action + "</div>" + body + "</section>";
+const table = (className, columns, body) => '<div class="table-wrap"><table class="' + className + '"><thead><tr>' + columns.map(title => '<th scope="col">' + escape(title) + "</th>").join("") + "</tr></thead><tbody>" + body + "</tbody></table></div>";
+const list = rows => '<dl class="data-list">' + rows.map(([term, value]) => "<div><dt>" + escape(term) + "</dt><dd>" + value + "</dd></div>").join("") + "</dl>";
+const link = (title, page) => '<a class="button quiet" href="#' + page + '">' + escape(title) + "</a>";
+const metric = (title, icon, value, note, destination, name = false) =>
+  '<a class="metric" href="#' + destination + '"><span class="metric-label">' + title + '<span class="metric-icon" aria-hidden="true">' + icon + '</span></span><strong class="metric-value' + (name ? ' name' : '') + '">' + escape(value) + '</strong><span class="metric-note">' + escape(note) + '</span></a>';
+
+function records() {
+  return table("records", ["任务", "源频道", "目标频道", "结果", "时间", ""], historyRows.map(row =>
+    "<tr><td><strong>#" + row.id + "</strong><small>" + row.kind + "</small></td><td>" + cell(row.source) + "</td><td>" + cell(row.target) + "</td><td>" +
+    pill(row.status, row.post ? "success" : "pending") + '</td><td class="time">' + row.time + "</td><td>" + button("详情", "detail", row.id) + "</td></tr>").join(""));
+}
+function dashboard() {
+  const active = pairs.filter(row => row.enabled).length;
+  return '<div class="metrics">' +
+    metric("默认目标频道", "◎", channels[defaultTarget], String(defaultTarget), "settings", true) +
+    metric("频道配对", "⇄", active + " / " + pairs.length, "已启用 / 总配对", "pairs") +
+    metric("队列任务", "≡", jobs.length, jobs.filter(row => row.status === "执行中").length + " 项执行中", "jobs") +
+    metric("待核对", "!", historyRows.filter(row => !row.post).length, "查看待确认转发", "jobs") + '</div><div class="columns"><div class="stack">' +
+    panel("最近转发", records(), link("全部记录", "history")) + '</div><div class="stack">' +
+    panel("自动转发", list([["转发模式", pill("严格一对一", "accent")], ["启用配对", active + " 组"], ["暂停配对", pairs.length - active + " 组"]]), link("管理", "pairs")) +
+    panel("账号状态", list([["Bot", pill("在线", "success")], ["TDL 转发账号", pill("已连接", "success")], ["Telethon 用户会话", pill("未连接")]]), link("设置", "settings")) + "</div></div>";
+}
+const descriptions = {
+  home:"查看转发、频道配对和账号运行状态。", pairs:"为每个监听源指定独立的自动转发目标。",
+  jobs:"查看当前执行、排队和需要核对的任务。", history:"查看近期的自动复制、同步和手动转发结果。",
+  mappings:"核对自动复制的源帖与目标帖。", settings:"查看默认目标和 Telegram 账号状态。",
+};
+function render() {
+  current = location.hash.slice(1) || "home";
+  if (!Object.hasOwn(sections, current)) current = "home";
+  $("#crumb").textContent = "转发管理 / " + sections[current][0];
+  $("#nav").innerHTML = Object.entries(sections).map(([key, [title, icon]]) =>
+    '<a class="nav-link" href="#' + key + '"' + (key === current ? ' aria-current="page"' : '') + '><span class="nav-icon" aria-hidden="true">' + icon + "</span>" + title + "</a>").join("");
+  const views = {
+    home: dashboard,
+    pairs: () => panel("严格一对一", table("pairs", ["源频道", "目标频道", "状态", "操作"], pairs.map((row, index) =>
+      "<tr><td>" + cell(row.source) + "</td><td>" + cell(row.target) + "</td><td>" +
+      pill(row.enabled ? "启用" : "暂停", row.enabled ? "success" : "") + "</td><td>" +
+      button(row.enabled ? "暂停" : "恢复", "toggle", index) + "</td></tr>").join(""))),
+    jobs: () => '<div class="stack">' + panel("活动任务", jobs.length ? table("queue", ["任务", "类型", "源帖", "目标频道", "状态"], jobs.map(row =>
+      "<tr><td>#" + row.id + "</td><td>" + row.kind + "</td><td>" + escape(row.link) + "</td><td>" + cell(row.target) + "</td><td>" +
+      pill(row.status, row.status === "执行中" ? "accent" : "pending") + "</td></tr>").join("")) : '<p class="empty">暂无活动任务。</p>') +
+      panel("待核对", table("records", ["任务", "源频道", "目标频道", "结果", ""], historyRows.filter(row => !row.post).map(row =>
+        "<tr><td>#" + row.id + "</td><td>" + cell(row.source) + "</td><td>" + cell(row.target) + "</td><td>" + pill(row.status, "pending") +
+        "</td><td>" + button("详情", "detail", row.id) + "</td></tr>").join(""))) + "</div>",
+    history: () => panel("转发记录", records()),
+    mappings: () => panel("已确认映射", table("map-table", ["源频道", "目标频道", "目标消息"], historyRows.filter(row => row.post && row.target !== defaultTarget).map(row =>
+      "<tr><td>" + cell(row.source) + "</td><td>" + cell(row.target) + "</td><td>#" + row.post + "</td></tr>").join(""))),
+    settings: () => '<div class="columns"><div class="stack">' + panel("转发设置", list([["默认目标频道", escape(label(defaultTarget))], ["自动转发模式", pill("严格一对一", "accent")]])) +
+      '</div><div class="stack">' + panel("账号状态", list([["Bot", pill("在线", "success")], ["TDL 转发账号", pill("已连接", "success")], ["Telethon 用户会话", pill("未连接")]])) + "</div></div>",
+  };
+  $("#page").innerHTML = '<div class="page-head"><div><h1>' + sections[current][0] + "</h1><p>" + descriptions[current] + "</p></div></div>" + views[current]();
+}
+function menu(open) {
+  $("#sidebar").classList.toggle("open", open);
+  $("#scrim").classList.toggle("open", open);
+  $("#menu").setAttribute("aria-expanded", String(open));
+}
+function showToast(message) {
+  const toast = $("#toast");
+  toast.textContent = message;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 3200);
+}
+function dialog(title, content, confirmLabel, callback) {
+  $("#dialog-title").textContent = title;
+  $("#dialog-body").innerHTML = content;
+  $("#error").textContent = "";
+  $("#submit").hidden = !callback;
+  $("#submit").textContent = confirmLabel || "确认";
+  onSubmit = callback;
+  $("#dialog").showModal();
+}
+const actions = {
+  new: () => dialog("新建转发", '<p class="muted">目标频道 · ' + escape(label(defaultTarget)) +
+    '</p><label>源帖链接<input name="link" type="url" required placeholder="https://t.me/c/1012345678/121"></label><label>类型<select name="kind"><option>手动转发</option><option>批量转发</option></select></label>',
+    "加入演示队列", data => {
+      const source = String(data.get("link")).trim();
+      if (!/^https:\/\/t\.me\/(?:c\/\d+|[A-Za-z][A-Za-z0-9_]*)\/\d+(?:\?single)?\/?$/.test(source)) {
+        $("#error").textContent = "请输入有效的 Telegram 原帖链接。";
+        return false;
+      }
+      const id = Math.max(48, ...jobs.map(job => job.id)) + 1;
+      jobs.push({id, link:source, target:defaultTarget, kind:String(data.get("kind")), status:"等待执行"});
+      location.hash = "jobs";
+      showToast("已加入演示队列 #" + id);
+      return true;
+    }),
+  close: () => $("#dialog").close(),
+  detail: id => {
+    const row = historyRows.find(item => item.id === Number(id));
+    if (!row) return;
+    dialog("转发记录 #" + row.id, list([["源频道", escape(label(row.source))], ["目标频道", escape(label(row.target))],
+      ["任务类型", escape(row.kind)], ["结果", pill(row.status, row.post ? "success" : "pending")],
+      ["目标消息", row.post ? "#" + row.post : "尚未确认"]]));
+  },
+  toggle: id => {
+    const row = pairs[Number(id)];
+    const verb = row.enabled ? "暂停" : "恢复";
+    dialog(verb + "频道配对", list([["源频道", escape(label(row.source))], ["目标频道", escape(label(row.target))]]), "确认" + verb, () => {
+      row.enabled = !row.enabled;
+      showToast("已" + verb + "配对");
+      return true;
+    });
+  },
+};
+$("#form").addEventListener("submit", event => {
+  event.preventDefault();
+  if (onSubmit?.(new FormData(event.currentTarget))) {
+    $("#dialog").close();
+    render();
+  }
+});
+$("#menu").onclick = () => menu(!$("#sidebar").classList.contains("open"));
+$("#scrim").onclick = () => { menu(false); $("#menu").focus(); };
+$("#theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme !== "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  $("#theme").textContent = dark ? "浅色模式" : "深色模式";
+  $("#theme").setAttribute("aria-pressed", String(dark));
+};
+document.addEventListener("click", event => {
+  const action = event.target.closest("[data-action]");
+  if (action && Object.hasOwn(actions, action.dataset.action)) actions[action.dataset.action](action.dataset.id);
+  if (event.target.closest("#nav a")) menu(false);
+});
+document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("#dialog").open) menu(false); });
+window.addEventListener("hashchange", () => { menu(false); render(); });
+render();
+</script>
+</body>
+</html>
